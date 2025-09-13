@@ -3,9 +3,10 @@ import matplotlib.pyplot as plt
 
 
 class IsingModel:
-    def __init__(self,L=None, J=None, steps=None, temperature=None):
+    def __init__(self,L=None, J=None, H=None ,steps=None, temperature=None):
         self.L = L  
         self.J = J   
+        self.H = H
         self.steps = steps  
         self.temperature = temperature
         self.spins = self.initialize_spins()
@@ -26,7 +27,7 @@ class IsingModel:
                     + self.spins[(i - 1) % self.L, j]
                     + self.spins[i, (j - 1) % self.L]
                 )
-                energy += -self.J * S * neighbors
+                energy += -self.J * S * neighbors - self.H * S
         return energy / 2  
 
     def calc_magnetization(self):
@@ -39,7 +40,8 @@ class IsingModel:
         right = self.spins[i, (j + 1) % self.L]
         up = self.spins[(i - 1) % self.L, j]
         down = self.spins[(i + 1) % self.L, j]
-        return 2 * self.J * self.spins[i, j] * (left + right + up + down)
+        neighbor_sum = left + right + up + down
+        return 2 * self.spins[i, j] * (self.J * neighbor_sum + self.H)
 
 
     def metropolis(self, T):
@@ -54,61 +56,48 @@ class IsingModel:
     def simulate(self):
         """模拟不同温度下的物理量"""
         specific_heats = []
-        susceptibilities = []
+        avg_energies = []
 
         for T in self.temperature:
             self.spins = self.initialize_spins()
             energies = []
-            magnetizations = []
 
             # 模拟步数
             for step in range(self.steps):
                 self.metropolis(T)
-                if step > self.steps // 2:  # 热平衡后开始采样
+                if step > self.steps // 2: 
                     energies.append(self.calc_total_energy())
-                    magnetizations.append(self.calc_magnetization())
 
-            # 计算物理量
+            # 计算平均能量
             avg_energy = np.mean(energies)
-            avg_energy_sq = np.mean(np.square(energies))
-            avg_magnetization = np.mean(magnetizations)
-            avg_magnetization_sq = np.mean(np.square(magnetizations))
+            avg_energies.append(avg_energy)
 
-            specific_heat = (avg_energy_sq - avg_energy**2) / (T**2 * self.L**2)
-            susceptibility = (avg_magnetization_sq - avg_magnetization**2) / (T * self.L**2)
-
+        # 计算比热
+        for i in range(1, len(self.temperature)):
+            dE = avg_energies[i] - avg_energies[i - 1]
+            dT = self.temperature[i] - self.temperature[i - 1]
+            specific_heat = dE / dT / (self.L**2)  # 归一化到每个格点
             specific_heats.append(specific_heat)
-            susceptibilities.append(susceptibility)
 
-        return specific_heats, susceptibilities
+        return specific_heats, avg_energies[1:]
 
-    def plot_results(self, specific_heats, susceptibilities):
-        """绘制比热和磁化率随温度的变化"""
-        plt.figure(figsize=(10, 5))
-
-        plt.subplot(1, 2, 1)
-        plt.plot(self.temperature, specific_heats, 'o-', label=r'$C_v$')
-        plt.axvline(x=2.269, color='r', linestyle='--')
+    def plot_results(self, specific_heats):
+        plt.figure(figsize=(6, 5))
+        plt.plot(self.temperature[1:], specific_heats,  label=r'$C_v$')
+        plt.axvline(x=2.27, color='r', linestyle='--', label=r'$T_c$')
         plt.xlabel('T')
         plt.ylabel(r'$C_v$')
         plt.legend()
-
-        plt.subplot(1, 2, 2)
-        plt.plot(self.temperature, susceptibilities, 'o-', label=r'$\chi$')
-        plt.axvline(x=2.269, color='r', linestyle='--', label=r'$T_c$')
-        plt.xlabel('T')
-        plt.ylabel(r'$\chi$')
-        plt.legend()
-
         plt.tight_layout()
-        plt.savefig('ising_model_results.png',dpi=300)
+        plt.savefig('ising_model_cv.png', dpi=300)
 
 if __name__ == "__main__":
     model = IsingModel(
         L=50, 
         J=1, 
-        steps=800, 
-        temperature=np.linspace(2.0, 3.0, 30)
+        H=0,
+        steps=200, 
+        temperature=np.linspace(2.0, 3.0, 100)
     )
-    specific_heats, susceptibilities = model.simulate()
-    model.plot_results(specific_heats, susceptibilities)
+    specific_heats , avg_energies = model.simulate()
+    model.plot_results(specific_heats)

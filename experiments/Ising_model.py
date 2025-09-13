@@ -34,7 +34,7 @@ frames = []
 
 for step in range(steps):
     spins = metropolis(spins, T)
-    if step % 4 == 0:  # 每5步保存一帧
+    if step % 4 == 0:  # 每i步保存一帧
         frames.append(spins.copy())
 
 # 绘制动画
