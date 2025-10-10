@@ -130,71 +130,71 @@ class VerletNeighborList:
 # ------------------------
 # Potential interface & LJ implement
 # ------------------------
-class PotentialBase:
-    def energy_and_forces(self, positions, cell, neighbor_list=None):
-        """
-        返回 (total_energy, forces_array)
-        forces shape (N,3)
-        """
-        raise NotImplementedError
-
-class LJPotential(PotentialBase):
-    def __init__(self, eps, sigma, rc=None):
-        self.eps = eps
-        self.sigma = sigma
-        self.rc = rc if rc is not None else 2.5*sigma  # radius cutoff
-        self.rc2 = self.rc*self.rc
-        # shift for continuity at rc
-        self.shift = 4*eps*((sigma/self.rc)**12 - (sigma/self.rc)**6)
-
-    def energy_and_forces(self, positions, cell, neighbor_list=None):
-        N = len(positions)
-        forces = np.zeros_like(positions)
-        energy = 0.0
-        vol = np.linalg.det(cell)
-        invcell = np.linalg.inv(cell)
-        sigma6 = self.sigma**6
-        rc2 = self.rc2
-
-        if neighbor_list is None:
-            # naive O(N^2)
-            for i in range(N-1):
-                ri = positions[i]
-                for j in range(i+1, N):
-                    dr = ri - positions[j]
-                    dr = min_image(dr, cell, invcell)
-                    r2 = dr.dot(dr)
-                    if r2 < rc2:
-                        invr2 = 1.0 / r2
-                        sr6 = sigma6 * (invr2**3)
-                        sr12 = sr6*sr6
-                        e = 4*self.eps*(sr12 - sr6) - self.shift
-                        energy += e
-                        fmag = 24*self.eps*invr2*(2*sr12 - sr6)
-                        fvec = fmag * dr
-                        forces[i] += fvec
-                        forces[j] -= fvec
-        else:
-            # use neighbor list to iterate pairs
-            for i in range(N):
-                ri = positions[i]
-                for j in neighbor_list.neighbors_of(i):
-                    if j <= i:  # ensure each pair handled once
-                        continue
-                    dr = ri - positions[j]
-                    dr = min_image(dr, cell, invcell)
-                    r2 = dr.dot(dr)
-                    if r2 < rc2:
-                        invr2 = 1.0 / r2
-                        sr6 = sigma6 * (invr2**3)
-                        sr12 = sr6*sr6
-                        e = 4*self.eps*(sr12 - sr6) - self.shift
-                        energy += e
-                        fmag = 24*self.eps*invr2*(2*sr12 - sr6)
-                        fvec = fmag * dr
-                        forces[i] += fvec
-                        forces[j] -= fvec
-        return energy, forces
+#class PotentialBase:
+#    def energy_and_forces(self, positions, cell, neighbor_list=None):
+#        """
+#        返回 (total_energy, forces_array)
+#        forces shape (N,3)
+#        """
+#        raise NotImplementedError
+#
+#class LJPotential(PotentialBase):
+#    def __init__(self, eps, sigma, rc=None):
+#        self.eps = eps
+#        self.sigma = sigma
+#        self.rc = rc if rc is not None else 2.5*sigma  # radius cutoff
+#        self.rc2 = self.rc*self.rc
+#        # shift for continuity at rc
+#        self.shift = 4*eps*((sigma/self.rc)**12 - (sigma/self.rc)**6)
+#
+#    def energy_and_forces(self, positions, cell, neighbor_list=None):
+#        N = len(positions)
+#        forces = np.zeros_like(positions)
+#        energy = 0.0
+#        vol = np.linalg.det(cell)
+#        invcell = np.linalg.inv(cell)
+#        sigma6 = self.sigma**6
+#        rc2 = self.rc2
+#
+#        if neighbor_list is None:
+#            # naive O(N^2)
+#            for i in range(N-1):
+#                ri = positions[i]
+#                for j in range(i+1, N):
+#                    dr = ri - positions[j]
+#                    dr = min_image(dr, cell, invcell)
+#                    r2 = dr.dot(dr)
+#                    if r2 < rc2:
+#                        invr2 = 1.0 / r2
+#                        sr6 = sigma6 * (invr2**3)
+#                        sr12 = sr6*sr6
+#                        e = 4*self.eps*(sr12 - sr6) - self.shift
+#                        energy += e
+#                        fmag = 24*self.eps*invr2*(2*sr12 - sr6)
+#                        fvec = fmag * dr
+#                        forces[i] += fvec
+#                        forces[j] -= fvec
+#        else:
+#            # use neighbor list to iterate pairs
+#            for i in range(N):
+#                ri = positions[i]
+#                for j in neighbor_list.neighbors_of(i):
+#                    if j <= i:  # ensure each pair handled once
+#                        continue
+#                    dr = ri - positions[j]
+#                    dr = min_image(dr, cell, invcell)
+#                    r2 = dr.dot(dr)
+#                    if r2 < rc2:
+#                        invr2 = 1.0 / r2
+#                        sr6 = sigma6 * (invr2**3)
+#                        sr12 = sr6*sr6
+#                        e = 4*self.eps*(sr12 - sr6) - self.shift
+#                        energy += e
+#                        fmag = 24*self.eps*invr2*(2*sr12 - sr6)
+#                        fvec = fmag * dr
+#                        forces[i] += fvec
+#                        forces[j] -= fvec
+#        return energy, forces
 
 # add more potential EAM for Al, Tersoff for C-diamond
 # to be continued...
@@ -507,8 +507,6 @@ def strain_stress_0K_pipeline(lattice_factory, a, nx, ny, nz, potential,
     )
     return {'sigma': sigma, 'E0': E0, 'pos0': pos0, 'cell0': cell0,'a_opt': a_opt}
 
-# ...existing code...
-
 # ------------------------
 # 单分量应变-应力（中心差分，0K 固定晶胞）
 # ------------------------
@@ -565,41 +563,81 @@ def stress_component_fd_0K(pos0_rel, cell, potential, i, j, strain_eps,
     sigma_ij = - dE / Vref
     return sigma_ij
 
+def stress_component_fd_at_strain(pos0_rel, cell, potential, i, j, eps0, delta=1e-4,
+                                  symmetric=True, relax_params=None,
+                                  use_nlist=False, cutoff=None,
+                                  volume_ref='reference', verbose=False):
+    """
+    计算 σ_ij(ε0)，使用中心差分：σ_ij(ε0) = (1/V_ref) * [E(ε0+δ) - E(ε0-δ)] / (2δ)
+    其中 δ>0。
+    """
+    if relax_params is None:
+        relax_params = {}
+
+    V0 = float(np.linalg.det(cell))
+    delta = abs(float(delta))
+
+    # ε0 + δ
+    eta_p = np.zeros((3,3))
+    eta_p[i, j] = eps0 + delta
+    if symmetric and i != j:
+        eta_p[j, i] = eps0 + delta
+    cell_p, pos_p0 = apply_strain(cell, pos0_rel, eta_p)
+    _, Ep, _, _, _ = relax_positions_fixed_cell(
+        pos_p0, cell_p, potential,
+        use_nlist=use_nlist, cutoff=cutoff,
+        verbose=False, **relax_params
+    )
+    Vp = float(np.linalg.det(cell_p))
+    # ε0 - δ
+    eta_m = np.zeros((3,3))
+    eta_m[i, j] = eps0 - delta
+    if symmetric and i != j:
+        eta_m[j, i] = eps0 - delta
+    cell_m, pos_m0 = apply_strain(cell, pos0_rel, eta_m)
+    _, Em, _, _, _ = relax_positions_fixed_cell(
+        pos_m0, cell_m, potential,
+        use_nlist=use_nlist, cutoff=cutoff,
+        verbose=False, **relax_params
+    )
+    Vm = float(np.linalg.det(cell_m))
+
+    dE = (Ep - Em) / (2.0 * delta)
+    Vref = 0.5*(Vp+Vm) if volume_ref == 'current' else V0
+    sigma_ij = dE / Vref
+    return sigma_ij
+
 # ------------------------
 # 扫描 σ_ij(ε) 并可保存与绘图
 # ------------------------
 def scan_sigma_component_vs_strain(pos0_rel, cell, potential, i, j, eps_list,
-                                   symmetric=True, relax_params=None,
+                                   delta_fd=1e-4, symmetric=True, relax_params=None,
                                    use_nlist=False, cutoff=None,
                                    volume_ref='reference', verbose=False,
                                    save_csv_path=None):
     """
-    对给定应变幅度列表 eps_list（标量列表）扫描 σ_ij(ε)。
-    返回:
-      eps_arr: (M,) 应变幅度
-      sigma_eVA3: (M,) eV/Å^3
-      sigma_GPa: (M,) GPa
+    扫描 σ_ij(ε)，对每个 ε0 用中心差分 δ=delta_fd>0。
     """
     eps_arr = np.asarray(eps_list, dtype=float)
     sig = []
-    for eps in eps_arr:
-        sij = stress_component_fd_0K(pos0_rel, cell, potential, i, j, eps,
-                                     symmetric=symmetric, relax_params=relax_params,
-                                     use_nlist=use_nlist, cutoff=cutoff,
-                                     volume_ref=volume_ref, verbose=verbose)
+    for eps0 in eps_arr:
+        sij = stress_component_fd_at_strain(pos0_rel, cell, potential, i, j, eps0,
+                                            delta=delta_fd, symmetric=symmetric,
+                                            relax_params=relax_params,
+                                            use_nlist=use_nlist, cutoff=cutoff,
+                                            volume_ref=volume_ref, verbose=verbose)
         sig.append(sij)
     sigma_eVA3 = np.array(sig, dtype=float)
-    sigma_GPa = sigma_eVA3 * 160.21766208  # 1 eV/Å^3 = 160.21766208 GPa
+    sigma_GPa = sigma_eVA3 * 160.21766208
 
     if save_csv_path is not None:
         import os, csv
         os.makedirs(os.path.dirname(save_csv_path) or ".", exist_ok=True)
         with open(save_csv_path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["epsilon", f"sigma_{i}{j}_eV_A3", f"sigma_{i}{j}_GPa"])
+            w.writerow(["epsilon0", f"sigma_{i}{j}_eV_A3", f"sigma_{i}{j}_GPa"])
             for e, s1, s2 in zip(eps_arr, sigma_eVA3, sigma_GPa):
                 w.writerow([f"{e:.8e}", f"{s1:.8e}", f"{s2:.8e}"])
-
     return eps_arr, sigma_eVA3, sigma_GPa
 
 def plot_sigma_vs_strain(eps_arr, sigma_vals, i, j, unit="GPa", title=None, save_png=None):
@@ -615,7 +653,7 @@ def plot_sigma_vs_strain(eps_arr, sigma_vals, i, j, unit="GPa", title=None, save
     plt.figure()
     plt.plot(eps_arr, y, 'o-', lw=1.5, ms=4)
     plt.xlabel("strain ε")
-    plt.ylabel(f"σ_{i}{j} ({unit})")
+    plt.ylabel(r"$\sigma_{i}{j}$"+unit)
     plt.grid(True, ls="--", alpha=0.4)
     if title:
         plt.title(title)
@@ -628,6 +666,7 @@ def plot_sigma_vs_strain(eps_arr, sigma_vals, i, j, unit="GPa", title=None, save
 # ------------------------
 if __name__ == "__main__":
     # Quick demo parameters (LJ placeholders)
+    from potential import LJPotential
     al_lat = make_fcc(a=4.05)  # 初始猜测
     nx,ny,nz = 2,2,2
     lj = LJPotential(eps=0.0103, sigma=2.5)
@@ -636,26 +675,26 @@ if __name__ == "__main__":
         strain_eps=1e-4, optimize_a=True, verbose=True,
         relax_params=dict(f_tol=1e-6, maxit=2000)
     )
-    print("a_opt =", out['a_opt'])
-    print("sigma (eV/Å^3) =\n", out['sigma'])
+    #print("a_opt =", out['a_opt'])
+    #print("sigma (eV/Å^3) =\n", out['sigma'])
 
-# 扫描示例：σ_xx 对不同应变幅度 ε 的关系（在 a_opt 基态上）
+    # 扫描示例：σ_xx 对不同应变幅度 ε 的关系（在 a_opt 基态上）
     try:
-        eps_list = np.linspace(-5e-3, 5e-3, 11)  # 建议对称区间，便于观察线性区
+        eps_list = np.linspace(0, 1e-1, 20)  # 建议对称区间，便于观察线性区
         # 基态（已通过上面的 pipeline 获得）
         pos0 = out['pos0']
         cell0 = out['cell0']
         i, j = 0, 0  # σ_xx 与 ε_xx
         eps_arr, sigma_eVA3, sigma_GPa = scan_sigma_component_vs_strain(
-            pos0, cell0, lj, i, j, eps_list,
-            symmetric=True, relax_params=dict(f_tol=1e-6, maxit=2000),
-            use_nlist=False, cutoff=None,
-            volume_ref='reference', verbose=False,
-            save_csv_path="./sigma_xx_scan.csv"
+        out['pos0'], out['cell0'], lj, i, j, eps_list,
+        delta_fd=1e-4,  # 始终正值
+        symmetric=True, relax_params=dict(f_tol=1e-6, maxit=2000),
+        use_nlist=False, cutoff=None,
+        volume_ref='reference', verbose=False,
+        save_csv_path=None
         )
-        print("扫描完成，数据写入 ./sigma_xx_scan.csv")
         plot_sigma_vs_strain(eps_arr, sigma_eVA3, i, j, unit="GPa",
-                             title="σ_xx vs ε_xx (0 K)", save_png="./sigma_xx_scan.png")
+                         title=None, save_png="./sigma_11_scan.png")
     except Exception as e:
         print("扫描/绘图示例出错：", e)
  
