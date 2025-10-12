@@ -39,9 +39,22 @@ def make_fcc(a):
     return Lattice('fcc', a, basis, syms)
 
 def make_diamond(a):
-    # conventional cubic cell: 2-atom basis on fcc lattice
-    basis = np.array([[0,0,0],[0.25,0.25,0.25]])
-    syms = ['C'] * 2
+    """
+    Diamond 结构的常规立方晶胞（simple cubic Bravais）+ 8 原子基矢。
+    注意：不要用 sc Bravais + 2 原子 (0,0,0) 与 (1/4,1/4,1/4)，那是 fcc Bravais 的表达法。
+    这里用 8 原子常规胞，便于与当前 build_supercell(正交对角 cell) 兼容。
+    """
+    basis = np.array([
+        [0.00, 0.00, 0.00],
+        [0.25, 0.25, 0.25],
+        [0.00, 0.50, 0.50],
+        [0.25, 0.75, 0.75],
+        [0.50, 0.00, 0.50],
+        [0.75, 0.25, 0.75],
+        [0.50, 0.50, 0.00],
+        [0.75, 0.75, 0.25],
+    ])
+    syms = ['C'] * len(basis)
     return Lattice('diamond', a, basis, syms)
 
 def build_supercell(lattice, nx, ny, nz):
@@ -126,82 +139,6 @@ class VerletNeighborList:
 
     def neighbors_of(self, i):
         return self.list[i]
-
-# ------------------------
-# Potential interface & LJ implement
-# ------------------------
-#class PotentialBase:
-#    def energy_and_forces(self, positions, cell, neighbor_list=None):
-#        """
-#        返回 (total_energy, forces_array)
-#        forces shape (N,3)
-#        """
-#        raise NotImplementedError
-#
-#class LJPotential(PotentialBase):
-#    def __init__(self, eps, sigma, rc=None):
-#        self.eps = eps
-#        self.sigma = sigma
-#        self.rc = rc if rc is not None else 2.5*sigma  # radius cutoff
-#        self.rc2 = self.rc*self.rc
-#        # shift for continuity at rc
-#        self.shift = 4*eps*((sigma/self.rc)**12 - (sigma/self.rc)**6)
-#
-#    def energy_and_forces(self, positions, cell, neighbor_list=None):
-#        N = len(positions)
-#        forces = np.zeros_like(positions)
-#        energy = 0.0
-#        vol = np.linalg.det(cell)
-#        invcell = np.linalg.inv(cell)
-#        sigma6 = self.sigma**6
-#        rc2 = self.rc2
-#
-#        if neighbor_list is None:
-#            # naive O(N^2)
-#            for i in range(N-1):
-#                ri = positions[i]
-#                for j in range(i+1, N):
-#                    dr = ri - positions[j]
-#                    dr = min_image(dr, cell, invcell)
-#                    r2 = dr.dot(dr)
-#                    if r2 < rc2:
-#                        invr2 = 1.0 / r2
-#                        sr6 = sigma6 * (invr2**3)
-#                        sr12 = sr6*sr6
-#                        e = 4*self.eps*(sr12 - sr6) - self.shift
-#                        energy += e
-#                        fmag = 24*self.eps*invr2*(2*sr12 - sr6)
-#                        fvec = fmag * dr
-#                        forces[i] += fvec
-#                        forces[j] -= fvec
-#        else:
-#            # use neighbor list to iterate pairs
-#            for i in range(N):
-#                ri = positions[i]
-#                for j in neighbor_list.neighbors_of(i):
-#                    if j <= i:  # ensure each pair handled once
-#                        continue
-#                    dr = ri - positions[j]
-#                    dr = min_image(dr, cell, invcell)
-#                    r2 = dr.dot(dr)
-#                    if r2 < rc2:
-#                        invr2 = 1.0 / r2
-#                        sr6 = sigma6 * (invr2**3)
-#                        sr12 = sr6*sr6
-#                        e = 4*self.eps*(sr12 - sr6) - self.shift
-#                        energy += e
-#                        fmag = 24*self.eps*invr2*(2*sr12 - sr6)
-#                        fvec = fmag * dr
-#                        forces[i] += fvec
-#                        forces[j] -= fvec
-#        return energy, forces
-
-# add more potential EAM for Al, Tersoff for C-diamond
-# to be continued...
-
-
-# first do structure optimization at 0K
-# the initial stru-optim module 
 
 # ------------------------
 # 共轭梯度优化器（0K，固定晶胞，仅原子坐标）
@@ -311,8 +248,28 @@ def relax_positions_fixed_cell(positions, cell, potential,
     """
     固定晶胞下的内部坐标优化。
     method: 'cg' 'RMM-DIIS'
+    method:
+    - 'cg': 使用本模块内置共轭梯度 (需要 potential.energy_and_forces)
+    - 'external': 调用 potential.relax_positions_fixed_cell (例如 DirectLAMMPSEAMPotential)
     返回: positions_relaxed, energy, forces, iter_count, neighbor_list_used
     """
+    # 外接 LAMMPS 或其它后端：优先走 external
+    if method == 'external' and hasattr(potential, 'relax_positions_fixed_cell'):
+        # 将本接口的容差/迭代数映射到外部接口
+        etol   = 1e-12
+        ftol   = f_tol
+        maxiter= int(maxit)
+        maxeval= max(10*int(maxit), 10000)
+        R_relaxed, E = potential.relax_positions_fixed_cell(
+            positions, cell,
+            min_style="fire", e_tol=etol, f_tol=ftol,
+            maxiter=maxiter, maxeval=maxeval,
+            align_to_input=True
+        )
+        F_dummy = np.zeros_like(positions)
+        it_dummy = -1
+        return R_relaxed, E, F_dummy, it_dummy, None
+    
     neighbor_list = None
     if use_nlist:
         if cutoff is None:
@@ -325,7 +282,7 @@ def relax_positions_fixed_cell(positions, cell, potential,
                                             neighbor_list=neighbor_list,
                                             f_tol=f_tol, maxit=maxit, verbose=verbose)
     else:
-        pass
+        raise ValueError(f"unknown method '{method}', expected 'cg' or 'external'")
     return pos_relaxed, E, F, it, neighbor_list
 
 # ------------------------
@@ -333,7 +290,8 @@ def relax_positions_fixed_cell(positions, cell, potential,
 # ------------------------
 def optimize_scalar_a_0K(lattice_factory, a_init, nx, ny, nz, potential,
                          relax_params=None, use_nlist=False, cutoff=None,
-                         bracket_frac=0.06, tol_rel=1e-4, max_iter=30, verbose=False):
+                         bracket_frac=0.06, tol_rel=1e-4, max_iter=30, verbose=False,
+                         method='cg'):
     """
     在 a 的一维空间做 0K 优化：对每个 a，重建超胞并在固定晶胞下松弛原子坐标，最小化总能量。
     返回: a_opt, pos0_opt, cell0_opt, E0_opt
@@ -345,7 +303,7 @@ def optimize_scalar_a_0K(lattice_factory, a_init, nx, ny, nz, potential,
         pos, cell, _ = build_supercell(lattice_factory(a), nx, ny, nz)
         pos_rel, E, _, _, _ = relax_positions_fixed_cell(
             pos, cell, potential,
-            use_nlist=use_nlist, cutoff=cutoff, verbose=False, **relax_params
+            use_nlist=use_nlist, cutoff=cutoff, verbose=False, method=method,**relax_params
         )
         return E, pos_rel, cell
 
@@ -408,7 +366,7 @@ def stress_via_energy_fd_0K(positions, cell, potential,
                             relax_params=None, use_nlist=False, cutoff=None,
                             volume_ref='reference', verbose=False, method='cg'):
     """
-    使用中心差分对能量对应变的导数计算应力: sigma_ij = - (1/V_ref) * ∂E/∂η_ji
+    使用中心差分对能量对应变的导数计算应力: sigma_ij =  (1/V_ref) * ∂E/∂η_ji
     参数:
       positions, cell: 初始结构（将先在未应变胞下做基态松弛）
       strain_eps: 单个分量的应变扰动幅度
@@ -467,7 +425,7 @@ def stress_via_energy_fd_0K(positions, cell, potential,
             else:
                 Vref = V0
             # 用户给定公式：σ_ij = -∂E/∂η_ji / Vref
-            sigma[i, j] = - dE_deta_ij / Vref
+            sigma[i, j] =  dE_deta_ij / Vref
 
     return sigma, E0, pos0_rel, cell
 
@@ -488,7 +446,7 @@ def strain_stress_0K_pipeline(lattice_factory, a, nx, ny, nz, potential,
         a_opt, pos0, cell0, E0 = optimize_scalar_a_0K(
             lattice_factory, a, nx, ny, nz, potential,
             relax_params=relax_params, use_nlist=use_nlist, cutoff=cutoff,
-            bracket_frac=bracket_frac, verbose=verbose
+            bracket_frac=bracket_frac, verbose=verbose, method=method,
         )
     else:
         a_opt = a
@@ -496,7 +454,7 @@ def strain_stress_0K_pipeline(lattice_factory, a, nx, ny, nz, potential,
         pos0, E0, _, _, _ = relax_positions_fixed_cell(
             pos0, cell0, potential,
             use_nlist=use_nlist, cutoff=cutoff,
-            verbose=verbose, **(relax_params or {})
+            verbose=verbose, method=method,**(relax_params or {})
         )
 
     sigma, _, _, _ = stress_via_energy_fd_0K(
@@ -510,12 +468,15 @@ def strain_stress_0K_pipeline(lattice_factory, a, nx, ny, nz, potential,
 # ------------------------
 # 单分量应变-应力（中心差分，0K 固定晶胞）
 # ------------------------
-def stress_component_fd_0K(pos0_rel, cell, potential, i, j, strain_eps,
-                           symmetric=True, relax_params=None,
-                           use_nlist=False, cutoff=None,
-                           volume_ref='reference', verbose=False):
+def stress_component_fd_at_strain(pos0_rel, cell, potential, i, j, eps0, delta=1e-4,
+                                  symmetric=True, relax_params=None,
+                                  use_nlist=False, cutoff=None,
+                                  volume_ref='reference', verbose=False,
+                                  method='cg'):
     """
-    计算某一分量 σ_ij(ε)，采用能量对应变的中心差分，0K 固定晶胞下每点重松弛原子。
+    计算 σ_ij(ε0)，使用中心差分：σ_ij(ε0) = (1/V_ref) * [E(ε0+δ) - E(ε0-δ)] / (2δ)
+    其中 δ>0。
+    采用能量对应变的中心差分，0K 固定晶胞下每点重松弛原子。
     参数:
       pos0_rel, cell: 未应变基态构型（已在 cell 下松弛）
       i, j: 分量索引 0..2，对应 x,y,z
@@ -525,51 +486,7 @@ def stress_component_fd_0K(pos0_rel, cell, potential, i, j, strain_eps,
     返回:
       sigma_ij: eV/Å^3
     说明:
-      按你给定公式使用 σ_ij = -(1/V_ref) * ∂E/∂η_ji。为简洁按矩阵同位赋值，与上面的整矩阵函数一致。
-    """
-    if relax_params is None:
-        relax_params = {}
-
-    V0 = float(np.linalg.det(cell))
-
-    # +eps
-    eta_p = np.zeros((3,3))
-    eta_p[i, j] = +strain_eps
-    if symmetric and i != j:
-        eta_p[j, i] = +strain_eps
-    cell_p, pos_p0 = apply_strain(cell, pos0_rel, eta_p)
-    pos_p, Ep, _, _, _ = relax_positions_fixed_cell(
-        pos_p0, cell_p, potential,
-        use_nlist=use_nlist, cutoff=cutoff,
-        verbose=False, **relax_params
-    )
-    Vp = float(np.linalg.det(cell_p))
-
-    # -eps
-    eta_m = np.zeros((3,3))
-    eta_m[i, j] = -strain_eps
-    if symmetric and i != j:
-        eta_m[j, i] = -strain_eps
-    cell_m, pos_m0 = apply_strain(cell, pos0_rel, eta_m)
-    pos_m, Em, _, _, _ = relax_positions_fixed_cell(
-        pos_m0, cell_m, potential,
-        use_nlist=use_nlist, cutoff=cutoff,
-        verbose=False, **relax_params
-    )
-    Vm = float(np.linalg.det(cell_m))
-
-    dE = (Ep - Em) / (2.0 * strain_eps)
-    Vref = 0.5*(Vp+Vm) if volume_ref == 'current' else V0
-    sigma_ij = - dE / Vref
-    return sigma_ij
-
-def stress_component_fd_at_strain(pos0_rel, cell, potential, i, j, eps0, delta=1e-4,
-                                  symmetric=True, relax_params=None,
-                                  use_nlist=False, cutoff=None,
-                                  volume_ref='reference', verbose=False):
-    """
-    计算 σ_ij(ε0)，使用中心差分：σ_ij(ε0) = (1/V_ref) * [E(ε0+δ) - E(ε0-δ)] / (2δ)
-    其中 δ>0。
+      按你给定公式使用 σ_ij = (1/V_ref) * ∂E/∂η_ji。为简洁按矩阵同位赋值，与上面的整矩阵函数一致。
     """
     if relax_params is None:
         relax_params = {}
@@ -586,7 +503,7 @@ def stress_component_fd_at_strain(pos0_rel, cell, potential, i, j, eps0, delta=1
     _, Ep, _, _, _ = relax_positions_fixed_cell(
         pos_p0, cell_p, potential,
         use_nlist=use_nlist, cutoff=cutoff,
-        verbose=False, **relax_params
+        verbose=False, method=method,  **relax_params
     )
     Vp = float(np.linalg.det(cell_p))
     # ε0 - δ
@@ -598,7 +515,7 @@ def stress_component_fd_at_strain(pos0_rel, cell, potential, i, j, eps0, delta=1
     _, Em, _, _, _ = relax_positions_fixed_cell(
         pos_m0, cell_m, potential,
         use_nlist=use_nlist, cutoff=cutoff,
-        verbose=False, **relax_params
+        verbose=False, method=method,  **relax_params
     )
     Vm = float(np.linalg.det(cell_m))
 
@@ -614,7 +531,7 @@ def scan_sigma_component_vs_strain(pos0_rel, cell, potential, i, j, eps_list,
                                    delta_fd=1e-4, symmetric=True, relax_params=None,
                                    use_nlist=False, cutoff=None,
                                    volume_ref='reference', verbose=False,
-                                   save_csv_path=None):
+                                   save_csv_path=None,method='cg'):
     """
     扫描 σ_ij(ε)，对每个 ε0 用中心差分 δ=delta_fd>0。
     """
@@ -625,7 +542,8 @@ def scan_sigma_component_vs_strain(pos0_rel, cell, potential, i, j, eps_list,
                                             delta=delta_fd, symmetric=symmetric,
                                             relax_params=relax_params,
                                             use_nlist=use_nlist, cutoff=cutoff,
-                                            volume_ref=volume_ref, verbose=verbose)
+                                            volume_ref=volume_ref, verbose=verbose,
+                                            method=method)
         sig.append(sij)
     sigma_eVA3 = np.array(sig, dtype=float)
     sigma_GPa = sigma_eVA3 * 160.21766208
@@ -640,61 +558,190 @@ def scan_sigma_component_vs_strain(pos0_rel, cell, potential, i, j, eps_list,
                 w.writerow([f"{e:.8e}", f"{s1:.8e}", f"{s2:.8e}"])
     return eps_arr, sigma_eVA3, sigma_GPa
 
-def plot_sigma_vs_strain(eps_arr, sigma_vals, i, j, unit="GPa", title=None, save_png=None):
+def plot_sigma_components_vs_strain(eps_arr, sigma_dict, unit="GPa", title=None, save_png=None):
     """
-    绘制 σ_ij vs ε。unit: 'GPa' 或 'eV/A^3'
+    sigma_dict: { (i,j): sigma_vals_eV_A3(ndarray 与 eps_arr同长), ... }
+    unit: 'GPa' 或 'eV/A^3'
     """
     try:
         import matplotlib.pyplot as plt
     except ImportError:
         print("matplotlib 未安装，跳过绘图。请先 pip install matplotlib")
         return
-    y = sigma_vals * 160.21766208 if unit.upper()=="GPA" else sigma_vals
+    factor = 160.21766208 if unit.upper()=="GPA" else 1.0
     plt.figure()
-    plt.plot(eps_arr, y, 'o-', lw=1.5, ms=4)
+    for (i, j), sigma_vals in sigma_dict.items():
+        y = sigma_vals * factor
+        # 标签用 1-based 记号更直观：σ11, σ12, σ23 ...
+        plt.plot(eps_arr, y, marker='o', lw=1.8, ms=4, label=f"σ{i+1}{j+1}")
     plt.xlabel("strain ε")
-    plt.ylabel(r"$\sigma_{i}{j}$"+unit)
-    plt.grid(True, ls="--", alpha=0.4)
+    plt.ylabel(f"σ_ij ({unit})")
     if title:
         plt.title(title)
+    plt.grid(True, ls="--", alpha=0.4)
+    plt.legend()
     if save_png:
-        plt.savefig(save_png, dpi=200, bbox_inches="tight")
-    plt.show()
+        plt.savefig(save_png, dpi=220, bbox_inches="tight")
+
+
+def scan_sigma_component_vs_strain_virial(pos0_rel, cell, potential, i, j, eps_list,
+                                          symmetric=True, relax_params=None, verbose=False):
+    """
+    使用 LAMMPS 直接返回的整体 virial 压力张量（换算为应力），避免能量差分带来的偏置。
+    要求 potential 提供 relax_energy_and_stress(positions, cell) 接口。
+    """
+    if relax_params is None:
+        relax_params = {}
+    eps_arr = np.asarray(eps_list, dtype=float)
+    sig = []
+    for eps0 in eps_arr:
+        eta = np.zeros((3,3))
+        eta[i, j] = eps0
+        if symmetric and i != j:
+            eta[j, i] = eps0
+        cell_s, pos_s0 = apply_strain(cell, pos0_rel, eta)
+        if not hasattr(potential, "relax_energy_and_stress"):
+            raise RuntimeError("potential 未实现 relax_energy_and_stress()")
+        _, _, sigma = potential.relax_energy_and_stress(
+            pos_s0, cell_s,
+            min_style="fire",
+            e_tol=relax_params.get("e_tol", 1e-12),
+            f_tol=relax_params.get("f_tol", 1e-6),
+            maxiter=relax_params.get("maxit", 20000),
+            maxeval=max(10*relax_params.get("maxit", 20000), 200000),
+            align_to_input=True
+        )
+        sig.append(float(sigma[i, j]))
+    sigma_eVA3 = np.array(sig, dtype=float)
+    sigma_GPa = sigma_eVA3 * 160.21766208
+    return eps_arr, sigma_eVA3, sigma_GPa
+
 
 # ------------------------
 # Example usage (do not run in module import if you don't want automatic run)
 # ------------------------
 if __name__ == "__main__":
     # Quick demo parameters (LJ placeholders)
-    from potential import LJPotential
-    al_lat = make_fcc(a=4.05)  # 初始猜测
-    nx,ny,nz = 2,2,2
-    lj = LJPotential(eps=0.0103, sigma=2.5)
-    out = strain_stress_0K_pipeline(
-        lattice_factory=make_fcc, a=al_lat.a, nx=nx, ny=ny, nz=nz, potential=lj,
-        strain_eps=1e-4, optimize_a=True, verbose=True,
-        relax_params=dict(f_tol=1e-6, maxit=2000)
-    )
+    #from potential import LJPotential
+    #al_lat = make_fcc(a=4.05)  # 初始猜测
+    #nx,ny,nz = 2,2,2
+    #lj = LJPotential(eps=0.0103, sigma=2.5)
+    #out = strain_stress_0K_pipeline(
+    #    lattice_factory=make_fcc, a=al_lat.a, nx=nx, ny=ny, nz=nz, potential=lj,
+    #    strain_eps=1e-4, optimize_a=True, verbose=True,
+    #    relax_params=dict(f_tol=1e-6, maxit=2000)
+    #)
     #print("a_opt =", out['a_opt'])
     #print("sigma (eV/Å^3) =\n", out['sigma'])
 
     # 扫描示例：σ_xx 对不同应变幅度 ε 的关系（在 a_opt 基态上）
-    try:
-        eps_list = np.linspace(0, 1e-1, 20)  # 建议对称区间，便于观察线性区
-        # 基态（已通过上面的 pipeline 获得）
-        pos0 = out['pos0']
-        cell0 = out['cell0']
-        i, j = 0, 0  # σ_xx 与 ε_xx
-        eps_arr, sigma_eVA3, sigma_GPa = scan_sigma_component_vs_strain(
-        out['pos0'], out['cell0'], lj, i, j, eps_list,
-        delta_fd=1e-4,  # 始终正值
-        symmetric=True, relax_params=dict(f_tol=1e-6, maxit=2000),
-        use_nlist=False, cutoff=None,
-        volume_ref='reference', verbose=False,
-        save_csv_path=None
+    #try:
+    #    eps_list = np.linspace(-9e-3, 9e-3, 20)  # 建议对称区间，便于观察线性区
+    #    comps = [(0,0),(1,1), (2,2), (1,2)]  # 11, 33, 23
+    #    sigma_dict = {}
+    #    eps_arr_ref = None        
+    #    for (i, j) in comps:
+    #        eps_arr, sigma_eVA3, _ = scan_sigma_component_vs_strain(
+    #            out['pos0'], out['cell0'], lj, i, j, eps_list,
+    #            delta_fd=1e-4, symmetric=True, relax_params=dict(f_tol=1e-6, maxit=2000),use_nlist=False, cutoff=None,
+    #            volume_ref='reference', verbose=False,
+    #            save_csv_path=None
+    #        )
+    #        sigma_dict[(i, j)] = sigma_eVA3
+    #        if eps_arr_ref is None:
+    #            eps_arr_ref = eps_arr
+    #    plot_sigma_components_vs_strain(
+    #        eps_arr_ref, sigma_dict, unit="GPa",
+    #        title=None, save_png="./sigma_multi_scan.png"
+    #    )
+    #except Exception as e:
+    #    print("扫描/绘图示例出错：", e)
+    """
+    from potential import DirectLAMMPSEAMPotential
+    nx, ny, nz = 2, 2, 2
+    a_guess = 4.00
+    pot = DirectLAMMPSEAMPotential(
+        eam_file=r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\Potentials\Al_zhou.eam.alloy",
+        lmp_cmd =r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\bin\lmp.exe",
+        element="Al", pair_style="eam/alloy", keep_tmp_files=False
+    )
+    out = strain_stress_0K_pipeline(
+        lattice_factory=make_fcc, a=a_guess, nx=nx, ny=ny, nz=nz, potential=pot,
+        strain_eps=1e-3, optimize_a=True, verbose=True,
+        relax_params=dict(f_tol=1e-6, maxit=2000),  # 将会映射到 etol/ftol/maxiter
+        method='external'
+    )
+    # 扫描多分量对比
+    import numpy as np
+    eps_list = np.linspace(-8e-3, 8e-3, 16)
+    comps = [(0,0), (0,1), (1,2)]
+    sigma_dict = {}
+    for (i, j) in comps:
+        eps_arr, sigma_eVA3, _ = scan_sigma_component_vs_strain(
+            out['pos0'], out['cell0'], pot, i, j, eps_list,
+            delta_fd=2e-4, symmetric=True, relax_params=dict(f_tol=1e-6, maxit=2000),
+            use_nlist=False, cutoff=None, volume_ref='reference', verbose=False,
+            save_csv_path=None, method='external'
         )
-        plot_sigma_vs_strain(eps_arr, sigma_eVA3, i, j, unit="GPa",
-                         title=None, save_png="./sigma_11_scan.png")
-    except Exception as e:
-        print("扫描/绘图示例出错：", e)
- 
+        sigma_dict[(i, j)] = sigma_eVA3
+    plot_sigma_components_vs_strain(eps_arr, sigma_dict, unit="GPa",
+                                    title=None, save_png="./test_Al_eam.png")
+    
+    
+    from potential import DirectLAMMPSLCBOPPotential
+    nx, ny, nz = 2, 2, 2
+    a_guess = 3.6
+    pot = DirectLAMMPSLCBOPPotential(
+        lcbop_file=r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\Potentials\C.lcbop",
+        lmp_cmd =r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\bin\lmp.exe",
+        element="C", pair_style="lcbop", keep_tmp_files=False
+    )
+    out = strain_stress_0K_pipeline(
+        lattice_factory=make_diamond, a=a_guess, nx=nx, ny=ny, nz=nz, potential=pot,
+        strain_eps=1e-3, optimize_a=True, verbose=True,
+        relax_params=dict(f_tol=1e-6, maxit=2000),  # 将会映射到 etol/ftol/maxiter
+        method='external'
+    )
+
+    eps_list = np.linspace(-8e-3, 8e-3, 16)
+    comps = [(0,0),(0,1)]
+    sigma_dict = {}
+    for (i, j) in comps:
+        eps_arr, sigma_eVA3, _ = scan_sigma_component_vs_strain(
+            out['pos0'], out['cell0'], pot, i, j, eps_list,
+            delta_fd=2e-4, symmetric=True, relax_params=dict(f_tol=1e-6, maxit=2000),
+            use_nlist=False, cutoff=None, volume_ref='reference', verbose=False,
+            save_csv_path=None, method='external'
+        )
+        sigma_dict[(i, j)] = sigma_eVA3
+    plot_sigma_components_vs_strain(eps_arr, sigma_dict, unit="GPa",
+                                    title=None, save_png="./sigma_multi_C_lcbop.png")
+    """
+
+    from potential import DirectLAMMPSLCBOPPotential
+    nx, ny, nz = 2, 2, 2
+    a_guess = 3.6
+    pot = DirectLAMMPSLCBOPPotential(
+        lcbop_file=r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\Potentials\C.lcbop",
+        lmp_cmd =r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\bin\lmp.exe",
+        element="C", pair_style="lcbop", keep_tmp_files=False
+    )
+    out = strain_stress_0K_pipeline(
+        lattice_factory=make_diamond, a=a_guess, nx=nx, ny=ny, nz=nz, potential=pot,
+        strain_eps=1e-3, optimize_a=True, verbose=True,
+        relax_params=dict(f_tol=1e-6, maxit=2000),  # 将会映射到 etol/ftol/maxiter
+        method='external'
+    )
+    eps_list = np.linspace(-8e-3, 8e-3, 16)
+    comps = [(0,0), (0,1), (1,2)]
+    sigma_dict = {}
+    for (i, j) in comps:
+        eps_arr, sigma_eVA3, _ = scan_sigma_component_vs_strain(
+            out['pos0'], out['cell0'], pot, i, j, eps_list,
+            delta_fd=2e-4, symmetric=True, relax_params=dict(f_tol=1e-6, maxit=2000),
+            use_nlist=False, cutoff=None, volume_ref='reference', verbose=False,
+            save_csv_path=None, method='external'
+        )
+        sigma_dict[(i, j)] = sigma_eVA3
+    plot_sigma_components_vs_strain(eps_arr, sigma_dict, unit="GPa",
+                                    title=None, save_png="./sigma_multi_C_lcbop.png")

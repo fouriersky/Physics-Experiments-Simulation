@@ -24,8 +24,6 @@ kB_eV_per_K = 8.617333262145e-5   # eV / K
 amu_to_eVfs2_A2 = 1.036427e-2     # 1 amu * (Å/fs)^2 = 1.036427e-2 eV
 
 # If your modules are in another file, import them:
-# from structure_optimization_module import PotentialBase, VerletNeighborList, virial_stress, min_image
-
 # ------------------------
 # Utilities
 # ------------------------
@@ -312,7 +310,8 @@ def run_md(positions, cell, masses, potential,
 # ------------------------
 if __name__ == "__main__":
     # Usage example (requires potential and build_supercell in your env)
-    from opt_method import make_fcc, build_supercell, LJPotential, VerletNeighborList
+    from opt_method import make_fcc, build_supercell, VerletNeighborList
+    from potential import LJPotential
     a0 = 4.05
     lat = make_fcc(a0)
     pos, cell, syms = build_supercell(lat, 2,2,2)

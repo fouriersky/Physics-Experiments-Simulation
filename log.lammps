@@ -1,0 +1,7 @@
+LAMMPS (22 Jul 2025 - Update 1)
+OMP_NUM_THREADS environment is not set. Defaulting to 1 thread.
+  using 1 OpenMP thread(s) per MPI task
+Loaded 1 plugins from F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\plugins
+lmp_serial -h
+ERROR: Unknown command: lmp_serial -h (src/input.cpp:314)
+Last input line: lmp_serial -h
