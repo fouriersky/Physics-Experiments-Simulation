@@ -108,7 +108,6 @@ class LJPotential(PotentialBase):
         return energy, forces
 
 # add more potential EAM for Al, Tersoff for C-diamond
-# to be continued...
 
 import shutil
 
@@ -158,7 +157,7 @@ class DirectLAMMPSEAMPotential(PotentialBase):
         return Q, R
     
     @staticmethod
-    def _write_data_atomic_triclinic(path, cell, positions):
+    def _write_data_atomic_triclinic(path, cell, positions, mass_amu=1.0):
         """
         将任意 cell 写成 LAMMPS triclinic data（tilt factors）。
         使用 QR 将 cell 旋到上三角 R，并把坐标旋到同一系下写入。
@@ -188,7 +187,8 @@ class DirectLAMMPSEAMPotential(PotentialBase):
             f.write(f"{0.0:.16g} {lz:.16g} zlo zhi\n")
             f.write(f"{xy:.16g} {xz:.16g} {yz:.16g} xy xz yz\n\n")
             f.write("Masses\n\n")
-            f.write(f"1 {26.981538:.6f}\n\n")  # 占位，主脚本里仍会设置 mass 1
+            #f.write(f"1 {26.981538:.6f}\n\n")  # 占位，主脚本里仍会设置 mass 1
+            f.write(f"1 {float(mass_amu):.6f}\n\n")
             f.write("Atoms # atomic\n\n")
             for i, (x, y, z) in enumerate(pos_lmp, start=1):
                 f.write(f"{i} 1 {x:.16g} {y:.16g} {z:.16g}\n")
@@ -240,8 +240,6 @@ class DirectLAMMPSEAMPotential(PotentialBase):
             "variable e equal pe",
             f'print "${{e}}" file {path_Eout} screen no',
             "undump d1",
-            # 日志重定向到 stdout，避免 log 文件为空困惑
-            #"log /dev/stdout",
             ""
         ]
         with open(path_in, "w", newline="\n") as f:
@@ -298,8 +296,7 @@ class DirectLAMMPSEAMPotential(PotentialBase):
             in_path    = os.path.join(tmp_dir, "in.min")
 
             #self._write_data_atomic_ortho(data_path, cell, positions)
-            Q, R = self._write_data_atomic_triclinic(data_path, cell, positions)
-
+            Q, R = self._write_data_atomic_triclinic(data_path, cell, positions, mass_amu=self.mass)
 
             lines = []
             lines += [
@@ -414,7 +411,7 @@ class DirectLAMMPSLCBOPPotential:
             in_path    = os.path.join(tmp_dir, "in.min")
 
             # 调用已有的 QR + triclinic 写出函数
-            Q, R = DirectLAMMPSEAMPotential._write_data_atomic_triclinic(data_path, cell, positions)
+            Q, R = DirectLAMMPSEAMPotential._write_data_atomic_triclinic(data_path, cell, positions, mass_amu=self.mass)
 
             lines = []
             lines += [
@@ -465,7 +462,6 @@ class DirectLAMMPSLCBOPPotential:
             if not self.keep_tmp_files:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
-
     @staticmethod
     def _parse_stress_bar_to_eVA3(path_stress):
         # 文件一行6个数：pxx pyy pzz pxy pxz pyz（单位 bar，LAMMPS 压力为正=受压）
@@ -508,7 +504,7 @@ class DirectLAMMPSLCBOPPotential:
             in_path    = os.path.join(tmp_dir, "in.min")
 
             # 任意晶胞：QR -> triclinic
-            Q, R = DirectLAMMPSEAMPotential._write_data_atomic_triclinic(data_path, cell, positions)
+            Q, R = DirectLAMMPSEAMPotential._write_data_atomic_triclinic(data_path, cell, positions, mass_amu=self.mass)
 
             lines = []
             lines += [
@@ -567,27 +563,254 @@ class DirectLAMMPSLCBOPPotential:
             if not self.keep_tmp_files:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
+class DirectLAMMPSEAMself:
+    """
+    仅将 LAMMPS 用作 EAM 的能量/力计算器（run 0），支持任意晶胞（内部 QR -> triclinic）。
+    返回 (energy_eV, forces[N,3])，forces 为原坐标系下。
+    """
+    def __init__(self, eam_file, lmp_cmd="lmp.exe", element="Al",
+                 mass=26.981538, pair_style="eam/alloy",
+                 keep_tmp_files=False):
+        self.eam_file = str(eam_file)
+        self.lmp_cmd = str(lmp_cmd)
+        self.element = str(element)
+        self.mass = float(mass)
+        self.pair_style = str(pair_style)   # "eam" 或 "eam/alloy"
+        self.keep_tmp_files = bool(keep_tmp_files)
+
+    def _check_exec(self):
+        try:
+            subprocess.run([self.lmp_cmd, "-h"], capture_output=True, text=True, timeout=5)
+        except Exception as e:
+            raise RuntimeError(f"无法执行 LAMMPS 可执行文件: {self.lmp_cmd}") from e
+
+    @staticmethod
+    def _parse_energy(path_Eout):
+        with open(path_Eout, "r") as f:
+            return float(f.read().strip())
+
+    @staticmethod
+    def _parse_forces_from_dump(path_dump, N):
+        forces = np.zeros((N, 3))
+        with open(path_dump, "r") as f:
+            for line in f:
+                if line.startswith("ITEM") or not line.strip():
+                    continue
+                parts = line.split()
+                if len(parts) < 8:
+                    continue
+                i = int(parts[0]) - 1
+                fx, fy, fz = map(float, parts[5:8])
+                forces[i] = [fx, fy, fz]
+        return forces
+
+    def energy_and_forces(self, positions, cell):
+        """调用 LAMMPS (run 0) 计算能量与力，支持非正交晶胞"""
+        self._check_exec()
+        positions = np.asarray(positions, dtype=float)
+        cell = np.asarray(cell, dtype=float)
+        N = len(positions)
+
+        tmpdir = tempfile.mkdtemp(prefix="eam_forcecalc_")
+        try:
+            pot_base = os.path.basename(self.eam_file)
+            shutil.copy2(self.eam_file, os.path.join(tmpdir, pot_base))
+            data_path = os.path.join(tmpdir, "data.in")
+            dump_path = os.path.join(tmpdir, "dump_forces.txt")
+            eout_path  = os.path.join(tmpdir, "energy.out")
+            in_path    = os.path.join(tmpdir, "in.forcecalc")
+
+            # 写 data：QR -> triclinic
+            Q, R = DirectLAMMPSEAMPotential._write_data_atomic_triclinic(
+                data_path, cell, positions, mass_amu=self.mass
+            )
+
+            # 写 LAMMPS 输入文件
+            lines = [
+                "units metal",
+                "atom_style atomic",
+                "boundary p p p",
+                "box tilt large",
+                f"read_data {data_path}",
+                "",
+                f"pair_style {self.pair_style}",
+            ]
+            if "alloy" in self.pair_style.lower():
+                lines.append(f"pair_coeff * * {pot_base} {self.element}")
+            else:
+                lines.append(f"pair_coeff * * {pot_base}")
+            lines += [
+                f"mass 1 {self.mass:.6f}",
+                "",
+                "neighbor 2.0 bin",
+                "neigh_modify delay 0 every 1 check yes",
+                "thermo_style custom pe",
+                "thermo 1",
+                f"dump d1 all custom 1 {dump_path} id type x y z fx fy fz",
+                'dump_modify d1 sort id format line "%d %d %.10g %.10g %.10g %.10g %.10g %.10g"',
+                "run 0",
+                "variable e equal pe",
+                f'print "${{e}}" file {eout_path} screen no',
+                "undump d1",
+                ""
+            ]
+            with open(in_path, "w") as f:
+                f.write("\n".join(lines))
+
+            proc = subprocess.run([self.lmp_cmd, "-in", in_path],
+                                  cwd=tmpdir, capture_output=True, text=True, timeout=120)
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"LAMMPS run0 失败，返回码 {proc.returncode}\n--- STDOUT ---\n{(proc.stdout or '')[-1500:]}\n"
+                    f"--- STDERR ---\n{(proc.stderr or '')[-1500:]}"
+                )
+
+            energy = self._parse_energy(eout_path)
+            forces_rot = self._parse_forces_from_dump(dump_path, N)
+            # 旋回到原坐标系
+            forces = (Q @ forces_rot.T).T
+            return energy, forces
+
+        finally:
+            if not self.keep_tmp_files:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+class DirectLAMMPSLCBOPself:
+    def __init__(self, lcbop_file, lmp_cmd="lmp.exe", element="C",
+                 mass=12.011, pair_style="lcbop",
+                 keep_tmp_files=False):
+        self.lcbop_file = str(lcbop_file)
+        self.lmp_cmd = str(lmp_cmd)
+        self.element = str(element)
+        self.mass = float(mass)
+        self.pair_style = str(pair_style)
+        self.keep_tmp_files = bool(keep_tmp_files)
+
+    def _check_exec(self):
+        try:
+            subprocess.run([self.lmp_cmd, "-h"],
+                           capture_output=True, text=True, timeout=5)
+        except Exception as e:
+            raise RuntimeError(f"无法执行 LAMMPS 可执行文件: {self.lmp_cmd}") from e
+
+    @staticmethod
+    def _parse_energy(path_Eout):
+        with open(path_Eout, "r") as f:
+            return float(f.read().strip())
+
+    @staticmethod
+    def _parse_forces_from_dump(path_dump, N):
+        forces = np.zeros((N, 3))
+        with open(path_dump, "r") as f:
+            for line in f:
+                if line.startswith("ITEM") or not line.strip():
+                    continue
+                parts = line.split()
+                if len(parts) < 8:
+                    continue
+                i = int(parts[0]) - 1
+                fx, fy, fz = map(float, parts[5:8])
+                forces[i] = [fx, fy, fz]
+        return forces
+
+    def energy_and_forces(self, positions, cell):
+        """调用 LAMMPS (run 0) 计算能量与力，支持非正交晶胞"""
+        self._check_exec()
+        positions = np.asarray(positions)
+        cell = np.asarray(cell)
+        N = len(positions)
+
+        tmpdir = tempfile.mkdtemp(prefix="lcbop_forcecalc_")
+        try:
+            pot_base = os.path.basename(self.lcbop_file)
+            shutil.copy2(self.lcbop_file, os.path.join(tmpdir, pot_base))
+            data_path = os.path.join(tmpdir, "data.in")
+            dump_path = os.path.join(tmpdir, "dump_forces.txt")
+            eout_path  = os.path.join(tmpdir, "energy.out")
+            in_path    = os.path.join(tmpdir, "in.forcecalc")
+
+            Q, R = DirectLAMMPSEAMPotential._write_data_atomic_triclinic(data_path, cell, positions,mass_amu=self.mass)
+
+            # 写 LAMMPS 输入文件
+            lines = [
+                "units metal",
+                "atom_style atomic",
+                "boundary p p p",
+                "box tilt large",  
+                f"read_data {data_path}",
+                "",
+                f"pair_style {self.pair_style}",
+                f"pair_coeff * * {pot_base} {self.element}",
+                f"mass 1 {self.mass:.6f}",
+                "",
+                "neighbor 2.0 bin",
+                "neigh_modify delay 0 every 1 check yes",
+                "thermo_style custom pe",
+                "thermo 1",
+                f"dump d1 all custom 1 {dump_path} id type x y z fx fy fz",
+                'dump_modify d1 sort id format line "%d %d %.10g %.10g %.10g %.10g %.10g %.10g"',
+                "run 0",
+                "variable e equal pe",
+                f'print "${{e}}" file {eout_path} screen no',
+                "undump d1",
+                ""
+            ]
+            with open(in_path, "w") as f:
+                f.write("\n".join(lines))
+
+            # 运行 LAMMPS
+            proc = subprocess.run([self.lmp_cmd, "-in", in_path],
+                                  cwd=tmpdir, capture_output=True, text=True,timeout=120)
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"LAMMPS run0 失败，返回码 {proc.returncode}\n--- STDOUT ---\n{(proc.stdout or '')[-1500:]}\n"
+                    f"--- STDERR ---\n{(proc.stderr or '')[-1500:]}"
+                )
+            # 解析输出
+            energy = self._parse_energy(eout_path)
+            forces_rot = self._parse_forces_from_dump(dump_path, N)
+            # 将力旋回到原坐标系：F = Q @ F'
+            forces = (Q @ forces_rot.T).T
+            return energy, forces
+
+        finally:
+            if not self.keep_tmp_files:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == "__main__":
 
-    from opt_method import make_diamond,build_supercell
+    from opt_method import make_diamond,build_supercell,make_fcc
 
     eam_file = r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\Potentials\Al_zhou.eam.alloy"
     lcbop_file = r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\Potentials\C.lcbop"
     lmp_cmd  = r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\bin\lmp.exe"
+#
+    #a_Al = 4.20
+    #lat = make_diamond(a_Al)
+    #positions, cell, symbols = build_supercell(lat, 2, 2, 2)
+    #pot_Al = DirectLAMMPSEAMPotential(eam_file=eam_file, lmp_cmd=lmp_cmd, element="Al",
+    #                               mass=26.981538, pair_style="eam/alloy", keep_tmp_files=True)
+    #R_relaxed, E_min = pot_Al.relax_positions_fixed_cell(positions, cell,
+    #                                                  min_style="fire",
+    #                                                  e_tol=1e-12, f_tol=1e-6,
+    #                                                  maxiter=5000, maxeval=50000,
+    #                                                  align_to_input=True)
+    #print("relaxed Energy (eV) =", E_min)
+    #print("relaxed positions (Å):\n", R_relaxed)
 
-    a_Al = 4.20
-    lat = make_diamond(a_Al)
+    #lat = make_diamond(3.567)
+    #positions, cell, symbols = build_supercell(lat, 2, 2, 2)
+
+    a_Al = 4.08
+    lat = make_fcc(a_Al)
     positions, cell, symbols = build_supercell(lat, 2, 2, 2)
-    pot_Al = DirectLAMMPSEAMPotential(eam_file=eam_file, lmp_cmd=lmp_cmd, element="Al",
-                                   mass=26.981538, pair_style="eam/alloy", keep_tmp_files=True)
-    R_relaxed, E_min = pot_Al.relax_positions_fixed_cell(positions, cell,
-                                                      min_style="fire",
-                                                      e_tol=1e-12, f_tol=1e-6,
-                                                      maxiter=5000, maxeval=50000,
-                                                      align_to_input=True)
-    print("relaxed Energy (eV) =", E_min)
-    print("relaxed positions (Å):\n", R_relaxed)
+
+    pot = DirectLAMMPSEAMself(eam_file, lmp_cmd, keep_tmp_files=True)
+
+    E, F = pot.energy_and_forces(positions, cell)
+    print("Total potential energy (eV) =", E)
+    print("Forces (eV/Å):\n", F)
 
     #from opt_method import make_diamond,build_supercell
     #a = 3.567  # diamond lattice constant

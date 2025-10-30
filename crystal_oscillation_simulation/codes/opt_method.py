@@ -285,6 +285,15 @@ def relax_positions_fixed_cell(positions, cell, potential,
         raise ValueError(f"unknown method '{method}', expected 'cg' or 'external'")
     return pos_relaxed, E, F, it, neighbor_list
 
+def _resolve_min_method(potential, method):
+    """
+    返回实际使用的方法：'external' 或 'cg'
+    """
+    if method in ("external", "cg"):
+        return method
+    # auto 选择：若 potential 提供 relax_positions_fixed_cell，则用 external
+    return "external" if hasattr(potential, "relax_positions_fixed_cell") else "cg"
+
 # ------------------------
 # 标量晶格常数 a 的 0K 优化（一维黄金分割搜索）
 # ------------------------
@@ -364,7 +373,7 @@ def optimize_scalar_a_0K(lattice_factory, a_init, nx, ny, nz, potential,
 def stress_via_energy_fd_0K(positions, cell, potential,
                             strain_eps=1e-4, symmetric=True,
                             relax_params=None, use_nlist=False, cutoff=None,
-                            volume_ref='reference', verbose=False, method='cg'):
+                            volume_ref='reference', verbose=False, method='auto'):
     """
     使用中心差分对能量对应变的导数计算应力: sigma_ij =  (1/V_ref) * ∂E/∂η_ji
     参数:
@@ -380,11 +389,12 @@ def stress_via_energy_fd_0K(positions, cell, potential,
     """
     if relax_params is None:
         relax_params = {}
+    method_eff = _resolve_min_method(potential, method)
     # 1) 基态松弛（未应变）
     pos0_rel, E0, _, _, _ = relax_positions_fixed_cell(
         positions, cell, potential,
         use_nlist=use_nlist, cutoff=cutoff,
-        verbose=verbose, method=method, **relax_params
+        verbose=verbose, method=method_eff, **relax_params
     )
     V0 = float(np.linalg.det(cell))
     sigma = np.zeros((3,3))
@@ -415,7 +425,7 @@ def stress_via_energy_fd_0K(positions, cell, potential,
             pos_m, Em, _, _, _ = relax_positions_fixed_cell(
                 pos_m0, cell_m, potential,
                 use_nlist=use_nlist, cutoff=cutoff,
-                verbose=False, method=method, **relax_params
+                verbose=False, method=method_eff, **relax_params
             )
             Vm = float(np.linalg.det(cell_m))
 
@@ -464,6 +474,213 @@ def strain_stress_0K_pipeline(lattice_factory, a, nx, ny, nz, potential,
         method=method, verbose=verbose
     )
     return {'sigma': sigma, 'E0': E0, 'pos0': pos0, 'cell0': cell0,'a_opt': a_opt}
+
+# NPT optimziation lattice parameter a
+def optimize_scalar_a_T_NPT(lattice_factory, a_init, nx, ny, nz, potential,
+                            T_K=300.0, P_bar=0.0,
+                            dt_fs=1.0, total_steps=60000, equil_steps=20000,
+                            block_steps=200, seed=12345,
+                            tau_t_ps=0.1, tau_p_ps=1.0,
+                            keep_tmp_files=False, verbose=True):
+    """
+    有限温度下的未微扰晶格常数优化（NPT，<P>=P_bar，默认 P=0）。
+    流程：
+      1) 以 a_init 构建正交超胞；
+      2) 运行 LAMMPS NPT (temp T_K, iso P_bar)，产出阶段时间平均 lx, ly, lz；
+      3) 返回 a_T = 平均后等效晶格常数（对 cubic: 三方向取平均）。
+    注意：
+      - 假设使用正交对角 cell 的构造（build_supercell），适用于 fcc/diamond 的常规胞表达。
+      - 若体系非各向同性，请自行使用三个方向的平均长度分别除以 nx,ny,nz。
+    返回:
+      dict: {
+        'a_T': float,
+        'L_avg': (Lx, Ly, Lz),
+        'cell_avg': 3x3 diag(Lx, Ly, Lz),
+        'T_K': T_K,
+        'P_bar': P_bar
+      }
+    """
+    import os, shutil, tempfile, subprocess
+    import numpy as np
+    from potential import DirectLAMMPSEAMPotential  # 仅复用其写 data 的 triclinic 工具
+
+    # 1) 构建初始超胞（正交）
+    positions, cell, _ = build_supercell(lattice_factory(a_init), nx, ny, nz)
+    mass_amu = float(getattr(potential, "mass", 12.0))
+
+    # 2) 解析势文件与 pair_style/pair_coeff
+    if hasattr(potential, "lcbop_file"):
+        pot_path = potential.lcbop_file
+        pair_style = getattr(potential, "pair_style", "lcbop")
+        element = getattr(potential, "element", "C")
+        pair_lines = [f"pair_style {pair_style}",
+                      f"pair_coeff * * {{POT}} {element}"]
+    elif hasattr(potential, "eam_file"):
+        pot_path = potential.eam_file
+        pair_style = getattr(potential, "pair_style", "eam/alloy")
+        element = getattr(potential, "element", "Al")
+        if "alloy" in pair_style.lower():
+            pair_lines = [f"pair_style {pair_style}",
+                          f"pair_coeff * * {{POT}} {element}"]
+        else:
+            pair_lines = [f"pair_style {pair_style}",
+                          f"pair_coeff * * {{POT}}"]
+    else:
+        raise RuntimeError("unknown potential backend: 需提供 lcbop_file 或 eam_file")
+
+    lmp_cmd = getattr(potential, "lmp_cmd", "lmp.exe")
+
+    # 3) 写入 LAMMPS data 与输入脚本
+    tmp_dir = tempfile.mkdtemp(prefix="npt_aopt_")
+    try:
+        pot_base = os.path.basename(pot_path)
+        shutil.copy2(pot_path, os.path.join(tmp_dir, pot_base))
+        data_path = os.path.join(tmp_dir, "data.in")
+        avg_path  = os.path.join(tmp_dir, "avg_box.txt")
+        dump_scaled_path = os.path.join(tmp_dir, "dump_scaled.lammpstrj")
+        in_path   = os.path.join(tmp_dir, "in.npt")
+
+        # 写 data（任意晶胞均可；当前 cell 为正交）
+        # 返回的 Q 未使用：NPT 只关心盒长的平均
+        DirectLAMMPSEAMPotential._write_data_atomic_triclinic(
+            data_path, cell, positions, mass_amu=mass_amu
+        )
+
+        T = float(T_K)
+        P = float(P_bar)
+        dt_ps = float(dt_fs) / 1000.0
+        Tdamp = float(tau_t_ps)
+        Pdamp = float(tau_p_ps)
+        n_eq  = int(equil_steps)
+        n_prd = int(total_steps - equil_steps)
+        n_prd = max(n_prd, 1)
+
+        # 每 block_steps 步累计一次平均
+        bs = int(block_steps)
+        if bs <= 0:
+            bs = 100
+
+        # 组装输入：先热化 run n_eq，再产出阶段 run n_prd 并用 fix ave/time 写 lx,ly,lz
+        lines = [
+            "units metal",
+            "atom_style atomic",
+            "boundary p p p",
+            f'read_data "{data_path}"',
+            "",
+            "### interactions",
+            pair_lines[0],
+            pair_lines[1].replace("{POT}", pot_base),
+            f"mass 1 {mass_amu:.6f}",
+            "",
+            "neighbor 2.0 bin",
+            "neigh_modify delay 0 every 1 check yes",
+            "",
+            f"variable T equal {T:.16g}",
+            f"variable P equal {P:.16g}",
+            f"variable SEED equal {int(seed)}",
+            f"timestep {dt_ps:.16g}",
+            "",
+            "velocity all create ${T} ${SEED} mom yes rot yes dist gaussian",
+            # NPT 等温等压（各向同性），pressure 单位：bar（units metal）
+            f"fix nptfix all npt temp ${{T}} ${{T}} {Tdamp:.6g} iso ${{P}} ${{P}} {Pdamp:.6g}",
+            "thermo_style custom step temp press pe ke lx ly lz vol",
+            f"thermo {bs}",
+            "",
+            f"run {n_eq}",
+            "",
+            "# production with box averaging",
+            "unfix nptfix",
+            f"fix nptfix all npt temp ${{T}} ${{T}} {Tdamp:.6g} iso ${{P}} ${{P}} {Pdamp:.6g}",
+            "variable Lx equal lx",
+            "variable Ly equal ly",
+            "variable Lz equal lz",
+            f'fix avgbox all ave/time 1 {bs} {bs} v_Lx v_Ly v_Lz file "{avg_path}"',
+            # 记录分数坐标 xs,ys,zs（方便映射到平均盒）
+            f'dump dsc all custom 1 "{dump_scaled_path}" id type xs ys zs',
+            "dump_modify dsc sort id",
+            f"run {n_prd}",
+            "unfix avgbox",
+            "undump dsc",
+            "unfix nptfix",
+            ""
+        ]
+        with open(in_path, "w", newline="\n") as f:
+            f.write("\n".join(lines))
+
+        # 4) 调 LAMMPS
+        proc = subprocess.run([lmp_cmd, "-in", in_path],
+                              cwd=tmp_dir, capture_output=True, text=True, timeout=max(60, total_steps//50))
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"NPT 失败，返回码 {proc.returncode}\n--- STDOUT ---\n{(proc.stdout or '')[-1500:]}\n"
+                f"--- STDERR ---\n{(proc.stderr or '')[-1500:]}"
+            )
+
+        # 5) 解析 avg_box.txt
+        Lx, Ly, Lz = [], [], []
+        with open(avg_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("Step"):
+                    continue
+                parts = line.split()
+                # fix ave/time 输出通常为：step lx ly lz
+                if len(parts) >= 4:
+                    try:
+                        lx = float(parts[1]); ly = float(parts[2]); lz = float(parts[3])
+                        Lx.append(lx); Ly.append(ly); Lz.append(lz)
+                    except Exception:
+                        pass
+        if not Lx:
+            raise RuntimeError("未能从 avg_box.txt 解析到盒长数据。")
+
+        Lx_avg = float(np.mean(Lx))
+        Ly_avg = float(np.mean(Ly))
+        Lz_avg = float(np.mean(Lz))
+
+        # 6) 等效晶格常数（适用于 cubic）
+        a_T = (Lx_avg / nx + Ly_avg / ny + Lz_avg / nz) / 3.0
+        cell_avg = np.diag([Lx_avg, Ly_avg, Lz_avg])
+        # 解析 dump_scaled 的最后一帧分数坐标 xs,ys,zs，并映射到平均盒
+        N = len(positions)
+        def _read_last_scaled_coords(path, N):
+            # 读取 lammpstrj，定位最后一个 "ITEM: ATOMS" 块
+            with open(path, "r") as f:
+                lines = f.readlines()
+            start_idx = None
+            for idx in range(len(lines)-1, -1, -1):
+                if lines[idx].startswith("ITEM: ATOMS"):
+                    start_idx = idx + 1
+                    break
+            if start_idx is None:
+                raise RuntimeError("未在 dump_scaled 中找到 ATOMS 块")
+            frac = np.zeros((N, 3), dtype=float)
+            for k in range(N):
+                parts = lines[start_idx + k].split()
+                # 格式: id type xs ys zs
+                i = int(parts[0]) - 1
+                xs = float(parts[2]); ys = float(parts[3]); zs = float(parts[4])
+                frac[i] = (xs, ys, zs)
+            return frac
+
+        frac_last = _read_last_scaled_coords(dump_scaled_path, N)
+        pos_avg = (cell_avg @ frac_last.T).T  # 映射到平均盒下的笛卡尔坐标
+        
+        if verbose:
+            print(f"[NPT a-opt] <Lx,Ly,Lz>=({Lx_avg:.6f}, {Ly_avg:.6f}, {Lz_avg:.6f}) Å -> a_T={a_T:.6f} Å @ {T_K} K")
+
+        return {
+            'a_T': a_T,
+            'L_avg': (Lx_avg, Ly_avg, Lz_avg),
+            'cell_avg': cell_avg,
+            'pos_avg': pos_avg,
+            'T_K': T_K,
+            'P_bar': P_bar
+        }
+
+    finally:
+        if not keep_tmp_files:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 # ------------------------
 # 单分量应变-应力（中心差分，0K 固定晶胞）
@@ -616,6 +833,155 @@ def scan_sigma_component_vs_strain_virial(pos0_rel, cell, potential, i, j, eps_l
     sigma_GPa = sigma_eVA3 * 160.21766208
     return eps_arr, sigma_eVA3, sigma_GPa
 
+def _tensor_to_voigt_sigma(s):
+    """σ(3x3)->Voigt: [sxx, syy, szz, syz, sxz, sxy]"""
+    s = np.asarray(s, dtype=float)
+    return np.array([s[0,0], s[1,1], s[2,2], s[1,2], s[0,2], s[0,1]], dtype=float)
+
+def _eta_from_voigt(j, eps, convention="engineering"):
+    """
+    根据 Voigt 分量 j 和标量 eps 生成对称应变张量 η。
+    convention='engineering' 时，eps 对剪切为工程剪切 γ，内部用 εij=γ/2。
+    """
+    E = np.zeros((3,3), dtype=float)
+    if j == 0:
+        E[0,0] = eps
+    elif j == 1:
+        E[1,1] = eps
+    elif j == 2:
+        E[2,2] = eps
+    elif j == 3:
+        val = 0.5*eps if convention == "engineering" else eps
+        E[1,2] = E[2,1] = val
+    elif j == 4:
+        val = 0.5*eps if convention == "engineering" else eps
+        E[0,2] = E[2,0] = val
+    elif j == 5:
+        val = 0.5*eps if convention == "engineering" else eps
+        E[0,1] = E[1,0] = val
+    else:
+        raise ValueError("Voigt 索引应为 0..5")
+    return E
+
+def sigma_vs_single_voigt_strain_0K(pos0, cell0, potential, j, eps_list,
+                                    delta_fd=2e-4, convention="engineering",
+                                    relax_params=None, use_nlist=False, cutoff=None,
+                                    volume_ref='reference', verbose=False, method='auto'):
+    """
+    对于给定的 Voigt 分量 j，扫描若干 eps，返回每个 eps 下的整张 σ(3x3)。
+    实现：对每个 eps，先将 η0(j,eps) 作用到 (pos0,cell0) 得到基态胞，再调
+    stress_via_energy_fd_0K 在该基态上计算 σ。
+    返回：(eps_arr, [σ_tensor_list])
+    """
+    if relax_params is None:
+        relax_params = {}
+    eps_arr = np.asarray(eps_list, dtype=float)
+    sigmas = []
+    for e in eps_arr:
+        eta0 = _eta_from_voigt(j, e, convention=convention)
+        cell_b, pos_b = apply_strain(cell0, pos0, eta0)
+        sigma_b, _, _, _ = stress_via_energy_fd_0K(
+            pos_b, cell_b, potential,
+            strain_eps=delta_fd, symmetric=True,
+            relax_params=relax_params, use_nlist=use_nlist, cutoff=cutoff,
+            volume_ref=volume_ref, verbose=verbose, method=method
+        )
+        sigmas.append(sigma_b)
+    return eps_arr, sigmas
+
+def build_C_0K_central_difference(pos0, cell0, potential,
+                                  strain_eps=1e-3,       # 标量；对剪切为工程剪切 γ
+                                  delta_fd=2e-4,         # stress_via_energy_fd_0K 内部用的微小差分
+                                  convention="engineering",
+                                  relax_params=None, use_nlist=False, cutoff=None,
+                                  volume_ref='reference', verbose=False, method='auto',
+                                  to_GPa=True, symmetrize=True):
+    """
+    0K 下用工程剪切记号做中心差分，直接构建 C 的 6 列：
+      C[:,j] = (σ(+ε_j) - σ(-ε_j)) / (2 ε_j)
+    其中 ε_j 对 j=3..5 为工程剪切 γ；施加到应变张量时用 εij=γ/2。
+    """
+    if relax_params is None:
+        relax_params = {}
+    eps = float(strain_eps)
+    C = np.zeros((6, 6), dtype=float)
+
+    for j in range(6):
+        # +eps（工程剪切/拉伸）
+        eta_p = _eta_from_voigt(j, +eps, convention=convention)
+        cell_p, pos_p = apply_strain(cell0, pos0, eta_p)
+        sigma_p, _, _, _ = stress_via_energy_fd_0K(
+            pos_p, cell_p, potential,
+            strain_eps=delta_fd, symmetric=True,
+            relax_params=relax_params, use_nlist=use_nlist, cutoff=cutoff,
+            volume_ref=volume_ref, verbose=verbose, method=method
+        )
+
+        # -eps
+        eta_m = _eta_from_voigt(j, -eps, convention=convention)
+        cell_m, pos_m = apply_strain(cell0, pos0, eta_m)
+        sigma_m, _, _, _ = stress_via_energy_fd_0K(
+            pos_m, cell_m, potential,
+            strain_eps=delta_fd, symmetric=True,
+            relax_params=relax_params, use_nlist=use_nlist, cutoff=cutoff,
+            volume_ref=volume_ref, verbose=verbose, method=method
+        )
+
+        # 列向量（Voigt）：σ_vec = [sxx, syy, szz, syz, sxz, sxy]
+        s_p = _tensor_to_voigt_sigma(sigma_p)
+        s_m = _tensor_to_voigt_sigma(sigma_m)
+        C[:, j] = (s_p - s_m) / (2.0 * eps)
+
+    if symmetrize:
+        C = 0.5 * (C + C.T)
+    if to_GPa:
+        C = C * 160.21766208
+    return C
+
+def build_C_0K_via_scans(pos0, cell0, potential,
+                         eps_max=2e-3, n_points=5, delta_fd=2e-4,
+                         convention="engineering", to_GPa=True,
+                         relax_params=None, use_nlist=False, cutoff=None,
+                         volume_ref='reference', verbose=False, method='cg',
+                         symmetrize=True):
+    """
+    0K 下通过多点线性拟合得到 C（默认工程剪切记号）。
+    对每个列 j（Voigt 0..5），扫 eps∈[-eps_max, ..., +eps_max]（包含0），
+    在每个 eps 的基态上计算整张 σ，然后对 σ_vec vs eps 做带截距线性拟合，取斜率为列。
+    """
+    if relax_params is None:
+        relax_params = {}
+    # 对称 eps 列表（含 0）
+    if n_points < 3:
+        n_points = 3
+    half = (n_points - 1) // 2
+    eps_list = np.linspace(-eps_max, eps_max, 2*half+1)
+
+    C = np.zeros((6,6), dtype=float)  # eV/Å^3 by default
+    voigt_pairs = [(0,0),(1,1),(2,2),(1,2),(0,2),(0,1)]
+
+    for j in range(6):
+        e_arr, sigma_tensors = sigma_vs_single_voigt_strain_0K(
+            pos0, cell0, potential, j, eps_list,
+            delta_fd=delta_fd, convention=convention,
+            relax_params=relax_params, use_nlist=use_nlist, cutoff=cutoff,
+            volume_ref=volume_ref, verbose=verbose, method=method
+        )
+        # 组装每个 eps 下的 Voigt σ 向量
+        S = np.vstack([_tensor_to_voigt_sigma(Sij) for Sij in sigma_tensors])  # (K,6)
+        # 对每个分量 i 拟合 σ_i = a_i*eps + b_i，取 a_i 为 C_{i,j}
+        for i in range(6):
+            a_i, b_i = np.polyfit(e_arr, S[:, i], 1)
+            C[i, j] = a_i
+
+    # 对工程剪切：已用 γ 作为 eps，列无需再缩放；若改为 tensor 记号，请将 C[:,3:6] *= 0.5
+    if convention == "engineering":
+        C[:, 3:6] *= 0.5
+    if symmetrize:
+        C = 0.5*(C + C.T)
+    if to_GPa:
+        C = C * 160.21766208  # eV/Å^3 -> GPa
+    return C
 
 # ------------------------
 # Example usage (do not run in module import if you don't want automatic run)
@@ -656,6 +1022,7 @@ if __name__ == "__main__":
     #    )
     #except Exception as e:
     #    print("扫描/绘图示例出错：", e)
+    
     """
     from potential import DirectLAMMPSEAMPotential
     nx, ny, nz = 2, 2, 2
@@ -687,35 +1054,6 @@ if __name__ == "__main__":
     plot_sigma_components_vs_strain(eps_arr, sigma_dict, unit="GPa",
                                     title=None, save_png="./test_Al_eam.png")
     
-    
-    from potential import DirectLAMMPSLCBOPPotential
-    nx, ny, nz = 2, 2, 2
-    a_guess = 3.6
-    pot = DirectLAMMPSLCBOPPotential(
-        lcbop_file=r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\Potentials\C.lcbop",
-        lmp_cmd =r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\bin\lmp.exe",
-        element="C", pair_style="lcbop", keep_tmp_files=False
-    )
-    out = strain_stress_0K_pipeline(
-        lattice_factory=make_diamond, a=a_guess, nx=nx, ny=ny, nz=nz, potential=pot,
-        strain_eps=1e-3, optimize_a=True, verbose=True,
-        relax_params=dict(f_tol=1e-6, maxit=2000),  # 将会映射到 etol/ftol/maxiter
-        method='external'
-    )
-
-    eps_list = np.linspace(-8e-3, 8e-3, 16)
-    comps = [(0,0),(0,1)]
-    sigma_dict = {}
-    for (i, j) in comps:
-        eps_arr, sigma_eVA3, _ = scan_sigma_component_vs_strain(
-            out['pos0'], out['cell0'], pot, i, j, eps_list,
-            delta_fd=2e-4, symmetric=True, relax_params=dict(f_tol=1e-6, maxit=2000),
-            use_nlist=False, cutoff=None, volume_ref='reference', verbose=False,
-            save_csv_path=None, method='external'
-        )
-        sigma_dict[(i, j)] = sigma_eVA3
-    plot_sigma_components_vs_strain(eps_arr, sigma_dict, unit="GPa",
-                                    title=None, save_png="./sigma_multi_C_lcbop.png")
     """
 
     from potential import DirectLAMMPSLCBOPPotential
@@ -729,7 +1067,7 @@ if __name__ == "__main__":
     out = strain_stress_0K_pipeline(
         lattice_factory=make_diamond, a=a_guess, nx=nx, ny=ny, nz=nz, potential=pot,
         strain_eps=1e-3, optimize_a=True, verbose=True,
-        relax_params=dict(f_tol=1e-6, maxit=2000),  # 将会映射到 etol/ftol/maxiter
+        relax_params=dict(f_tol=1e-6, maxit=2000),  
         method='external'
     )
     eps_list = np.linspace(-8e-3, 8e-3, 16)
@@ -745,3 +1083,4 @@ if __name__ == "__main__":
         sigma_dict[(i, j)] = sigma_eVA3
     plot_sigma_components_vs_strain(eps_arr, sigma_dict, unit="GPa",
                                     title=None, save_png="./sigma_multi_C_lcbop.png")
+    
