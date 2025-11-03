@@ -1023,9 +1023,9 @@ if __name__ == "__main__":
     #except Exception as e:
     #    print("扫描/绘图示例出错：", e)
     
-    """
+    
     from potential import DirectLAMMPSEAMPotential
-    nx, ny, nz = 2, 2, 2
+    nx, ny, nz = 3, 3, 3
     a_guess = 4.00
     pot = DirectLAMMPSEAMPotential(
         eam_file=r"F:\lammps\LAMMPS 64-bit 22Jul2025 with Python\Potentials\Al_zhou.eam.alloy",
@@ -1039,20 +1039,20 @@ if __name__ == "__main__":
         method='external'
     )
     # 扫描多分量对比
-    import numpy as np
-    eps_list = np.linspace(-8e-3, 8e-3, 16)
-    comps = [(0,0), (0,1), (1,2)]
-    sigma_dict = {}
-    for (i, j) in comps:
-        eps_arr, sigma_eVA3, _ = scan_sigma_component_vs_strain(
-            out['pos0'], out['cell0'], pot, i, j, eps_list,
-            delta_fd=2e-4, symmetric=True, relax_params=dict(f_tol=1e-6, maxit=2000),
-            use_nlist=False, cutoff=None, volume_ref='reference', verbose=False,
-            save_csv_path=None, method='external'
-        )
-        sigma_dict[(i, j)] = sigma_eVA3
-    plot_sigma_components_vs_strain(eps_arr, sigma_dict, unit="GPa",
-                                    title=None, save_png="./test_Al_eam.png")
+    #import numpy as np
+    #eps_list = np.linspace(-8e-3, 8e-3, 16)
+    #comps = [(0,0), (0,1), (1,2)]
+    #sigma_dict = {}
+    #for (i, j) in comps:
+    #    eps_arr, sigma_eVA3, _ = scan_sigma_component_vs_strain(
+    #        out['pos0'], out['cell0'], pot, i, j, eps_list,
+    #        delta_fd=2e-4, symmetric=True, relax_params=dict(f_tol=1e-6, maxit=2000),
+    #        use_nlist=False, cutoff=None, volume_ref='reference', verbose=False,
+    #        save_csv_path=None, method='external'
+    #    )
+    #    sigma_dict[(i, j)] = sigma_eVA3
+    #plot_sigma_components_vs_strain(eps_arr, sigma_dict, unit="GPa",
+    #                                title=None, save_png="./test_Al_eam.png")
     
     """
 
@@ -1084,3 +1084,4 @@ if __name__ == "__main__":
     plot_sigma_components_vs_strain(eps_arr, sigma_dict, unit="GPa",
                                     title=None, save_png="./sigma_multi_C_lcbop.png")
     
+    """
