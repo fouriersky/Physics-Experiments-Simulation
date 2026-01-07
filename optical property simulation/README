@@ -1,0 +1,96 @@
+<style>
+  .body {
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 18px;
+    margin: 40px;
+    line-height: 1.5;
+    max-width: 800px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+</style>
+
+<div class="body">
+
+# Optical properties of crystal
+[TOC]
+## Introduction
+This is an independent object (a physics course homework) to simulate optical field in crystal, mainly focus on photon absorption, giving $\varepsilon(\omega)$,etc. 
+Here I choose diamond silicon as a simple start. We will first compute its Hamiltonian matrix with Tight-binding model, get its eigenstates, then compute the probability of electron transition, use it to bulid the needed optical quantities.
+
+## Basic theory (brief version)
+In this part I'll relate some of the knowledge needed in this project briefly. For more complete learning you can refer to the following resources.
+
+- **Tight-Binding model + Slater-Koster method** 
+We first have Bloch wave function in Tight-Binding model:
+$$\Psi_{i\alpha}=\frac{1}{\sqrt{N}}\sum_n e^{ik\cdot R_n} \phi_{i\alpha}(r-R_n-b_i)  $$
+$i$ means $i$th atom in a unit cell, $\alpha$ means the quantum number of the orbital, say $(n,l,m)$, for simplicity, we don't take spin into account.
+$$ \bra{\Psi_{i\alpha}}\hat{H}\ket{\Psi_{j\beta}}=\sum_n e^{ik\cdot R_n}\int dr \phi^*_{i\alpha}(r-R_n-b_i)\hat{H} \phi_{j\beta}(r-b_j)$$
+$$\hat{H}= -\frac{\hbar^2}{2m}\frac{d^2}{dr^2}+ \sum_{n,i} V(r-R_n-b_i) $$
+Given that the orbital is localized, we just consider on-site term and two-center term in the integral, which means three center term is ignored(whether it's OK needs to be verified)
+Then we will use spherical harmonic function to rewrite orbital with quantum number $\alpha$, into s,p,d orbital, they have different directions, and Slater-Koster method use empirical parameters to give onsite term and  $V_{mn,\nu}(R)$, which is a function of two-center distance $R$, 
+$$ V_{mn,\nu}(R) = V_{mn,\nu}(R_0)(\frac{R_0}{R})^{k} $$ 
+Harrison originally used a general exponent of $k=2$ for all matrix elements, we can also use exponential decay to tune the distance dependence.
+Finally we can get Hamiltonian matrix $H(k)$, then diagonalize it to get eigenvalues and eigenstates.
+Unlike DFT's Kohn-Sham equation, the XC term is not included in constructing Hamiltonian, but the empirical parameters have considered this part already, so we can get good band structure with proper parameters.
+
+- **Optical property calculation**
+When electromagnetic field is applied to the crystal, electrons will transit from valence band to conduction band, giving absorption. The probability of transition is determined by the hopping matrix element between two states, which can be calculated by momentum operator $\hat{p}$ or gradient of Hamiltonian $\nabla_k H(k)$.
+$$ \langle u_{ck} | \hat{p} | u_{vk}
+\rangle = \frac{m}{\hbar} \langle u_{ck} | \nabla_k H(k) | u_{vk} \rangle$$
+Then we can get the imaginary part of dielectric function $\epsilon_2(\omega)$ by summing over all k-points and possible transitions, then use Kramer-Kronig relation to get real part $\epsilon_1(\omega)$.
+$$ \epsilon_2^{\alpha\beta}(\omega) = \frac{4\pi^2 e^2}{\Omega}\lim_{q\to 0}\frac{1}{q^2}\sum_{c,v,k} 2w_k \delta(E_{c,k}-E_{v,k}-\hbar \omega) |\langle u_{c,k+e_\alpha q}|u_{v,k}\rangle|^2  $$
+where $c,v$ means conduction band and valence band respectively, $u_{n,k}$ is the cell-periodic part of the Bloch function.
+ other optical quantities like refractive index $n(\omega)$,  absorption coefficient $\alpha(\omega)$,etc. can be derived from $\epsilon_1(\omega)$ and $\epsilon_2(\omega)$.
+$$ n(\omega) = \sqrt{\frac{\sqrt{\epsilon_1^2(\omega)+\epsilon_2^2(\omega)}+\epsilon_1(\omega)}{2}} $$
+
+$$ \alpha(\omega) = \frac{\omega}{c} \sqrt{2\sqrt{\epsilon_1^2(\omega)+\epsilon_2^2(\omega)} - 2\epsilon_1(\omega)} $$
+
+
+## How to realize
+
+### Hamiltonian calculation
+ In the `SK.py`, we use a 10-orbital-basis ($sp^3d^5s^*$) to calculate the Hamiltonian of diamond Si (space group 227, Fd3m). It only considers the onsite and nearest-neighbor-interaction, NO three center terms are included. What's more, we plus distance-tuning to the real-space two-center integral. Here by adding d-orbital and excited s* orbital, we can get better fitting to the real band structure (conduction bands especially), refer to [2] for more details.
+ We first get the real space hamiltonian matrix elements $\bra{\phi_{\alpha}(r-R)}H\ket{\phi_{\beta}(r)}$ , then do Fourier transform to get $H(k)$, compute the indirect bandgap = 1.147eV VBM at $\Gamma$ point, CBM at $\Gamma \rightarrow X$ path, direct bandgap = 2.56eV at $\Gamma$ point, which is quite close to experimental value.
+
+ ### Optical property
+ In the `hopping.py` module, we calculate the optical property of silicon by compute $\epsilon_2(\omega)$, which is the imaginary part of dielectric function $\epsilon(\omega)$, 
+ define the hopping matrix element between two states by momentum operator $\hat{p}$ or gradient of Hamiltonian $\nabla_k H(k)$.
+ $$ \langle u_{ck} | \hat{p} | u_{vk}
+\rangle = \frac{m}{\hbar} \langle u_{ck} | \nabla_k H(k) | u_{vk} \rangle$$
+
+ Then we can get the imaginary part of dielectric function $\epsilon_2(\omega)$ by summing over all k-points and possible transitions, 
+ where $c,v$ means conduction band and valence band respectively, $u_{n,k}$ is the cell-periodic part of the Bloch function.then use Kramer-Kronig relation to get $\epsilon_1(\omega)$, after that we can get other optical quantities like refractive index $n(\omega)$,  absorption coefficient $\alpha(\omega)$,etc.
+    
+ ### Rabi oscillation
+ In the `Rabi.py`, we apply electromagnetic field to a two-level system, using RWA(rotating wave approximation), giving its distribution oscillation behaveior, the distribution between valence band and conduction band will oscillate with time under resonant light field.
+ $$ H = \begin{bmatrix} E_c & d\cdot E_0 e^{-i\omega t} \\ d\cdot E_0 e^{i\omega t} & E_v \end{bmatrix} $$
+Thus we can get the time-dependent Schrödinger equation, solve it with 4th-order Runge-Kutta method, get the distribution oscillation between two bands. The frequency of oscillation is determined by Rabi frequency $\Omega_R = \frac{d\cdot E_0}{\hbar}$
+
+ ### Break symmetry
+Apply strain to silicon diamond: 2.00% along z-axis (Poisson=0.28)
+- before:
+VBM = -0.0157 eV @ k-index 59
+CBM = 1.1312 eV @ k-index 107
+Indirect gap = 1.1469 eV (direct gap = 3.3380 eV)
+Eigenvalues at Gamma near VBM: [-0.01571793 -0.01571793 -0.01571793]
+
+- after:
+VBM = 0.1187 eV @ k-index 59
+CBM = 1.1391 eV @ k-index 107
+Indirect gap = 1.0203 eV (direct gap = 3.1576 eV)
+Eigenvalues at Gamma near VBM: [-0.16713853  0.11871142  0.11871142]
+
+take one point for example, Fd3m group $\Gamma$ at VBM $\Gamma_{25}'$  3 degenerated $\rightarrow$ split into 1+2 degenerated
+this strain will introduce anisotropy into the optical property, different response to $E$ along x or y or z axis
+
+## What more can we do?
+- Plus space group symmetry to reduce k-points computation cost
+- Add phonon interaction in electron hopping
+- Do Wannier interpolation of electron bands (MLWFs) , will give hybrid atom orbital sp3-like functions
+- Add exciton effect in optical property calculation (BSE)
+
+## References
+[1] J. C. Slater and G. F. Koster, "Simplified LCAO Method for the Periodic Potential Problem", [*Phys. Rev.* **94**, 1498 (1954)](https://doi.org/10.1103/PhysRev.94.1498).
+[2] T. B. Boykin, G. Klimeck, and F. Oyafuso, "Valence band effective-mass expressions in the sp3d5s* empirical tight-binding model applied to a Si and Ge parametrization", [*Phys. Rev. B* **69**, 115201 (2004)](https://doi.org/10.1103/PhysRevB.69.115201).
+[3] D. A. Papaconstantopoulos and M. J. Mehl, "The Slater–Koster tight-binding method: a computationally efficient and accurate approach", [J. Phys.: Condens. Matter **15**, R413 (2003)](https://doi.org/10.1088/0953-8984/15/10/201)

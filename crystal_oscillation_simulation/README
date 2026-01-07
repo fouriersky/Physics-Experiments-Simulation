@@ -1,0 +1,77 @@
+<style>
+  .body {
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 18px;
+    margin: 40px;
+    line-height: 1.5;
+    max-width: 800px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+</style>
+
+<div class="body">
+
+# Elastic properties simulation of crystals
+[TOC]
+## Project Introduction
+This code aims at simulating elastic properties of crystals, we investigate 2 kinds of crystal: Al and diamond C, which represent two types of bonding, covalent and metallic bonds. Thus giving different elastic properties. We use software **LAMMPS** as the thermal bath engine, and use Lennard-Jones potential and other empirical potentials such as **LCBOP** for diamond and **EAM** for Al to describe the interaction between atoms. The code can calculate elastic constants at 0K and finite temperature.
+
+## Basic theory
+
+- **Hooke theorem**
+In the elastic deformation region, the stress is proportional to the strain, which is called Hooke's law:
+$$ \sigma = \varepsilon E $$
+$\sigma$ means stress , $\varepsilon$ means strain , E means modulus of elasticity.
+
+- **Poisson effect**
+Atensile stress along the z axis causes the material to stretch along the z axis and to contract along the x and y axes.Thus define the  Poisson's Ratio $\nu$ :
+$$\nu = -\frac{\text{lateral strain}}{\text{longitudinal strain}} $$
+for isotropic crystal $\nu$ remains constant in 3 directions
+- **Elastic constants**
+The elastic constants $C_{ij}$ describe the relationship between stress and strain in a material. For small deformations, the stress-strain relationship can be expressed as:
+$$ \sigma_{i} = C_{ij} \varepsilon_{j} $$
+where $\sigma_{i}$ is the stress tensor, $\varepsilon_{j}$ is the strain tensor, and $C_{ij}$ is the elastic constants matrix. For anisotropic materials, $C_{ij}$ can have up to 21 independent components, while for isotropic materials, it reduces to just 2 independent constants (e.g., Young's modulus and Poisson's ratio).
+stress tensor + strain tensor  to give strain-stress relation
+$$ \sigma_{ij} = -\frac{\partial E}{\partial \eta_{ji}}$$
+$\eta_{ji}$ from strain tensor $3\times 3$ on cell matrix, here $E$ is total energy of system,  then do finite difference to get $C_{ij}$
+$$ C_{ijkl} = \frac{\partial \sigma_{ij}}{\partial \eta_{kl}} $$
+
+
+- **Linnard Jones Potential**
+  The most simple and widely used potential to describe the interaction between a pair of neutral atoms or molecules is the Lennard-Jones (LJ) potential, can be written as:
+$$ V(r) = 4\varepsilon[(\frac{\sigma}{r})^{12} − (\frac{\sigma}{r})^6] $$
+
+- **EAM potential**
+  The Embedded Atom Method (EAM) is a semi-empirical potential used to model metallic systems. The total energy of the system is given by:
+$$ E_{total} = \sum_{i} F(\rho_{i}) + \frac{1}{2} \sum_{i,j} \phi(r_{ij}) $$
+where $F(\rho_{i})$ is the embedding energy as a function of the local electron density $\rho_{i}$ at atom i, and $\phi(r_{ij})$ is the pair potential between atoms i and j.
+
+- **LCBOP potential**
+  The Long-range Carbon Bond Order Potential (LCBOP) is a potential specifically designed to model carbon-based materials, including diamond and graphite. It combines short-range bond-order terms with long-range van der Waals interactions to accurately capture the behavior of carbon atoms in various configurations.
+
+- **Molecular Dynamics (MD) simulation**
+  Molecular dynamics (MD) simulation is a computational method used to study the physical movements of atoms and molecules over time. Commonly used ensembles include NVT (constant number of particles, volume, and temperature) and NPT (constant number of particles, pressure, and temperature). For temperature control, thermostats like Nose-Hoover are often employed, while for pressure control, barostats such as Parrinello-Rahman are used.
+  PBC (Periodic Boundary Conditions) are applied to simulate an infinite system by repeating the simulation box in all directions. So we must use a sufficiently large supercell to minimize finite size effects.
+
+## LAMMPS 
+In this project, we use LAMMPS's API to run MD on windows system PC since it's much faster then python.
+lammps version: lammps-64bit-7Aug2023
+
+## Basic workflow
+1. **0K structure optimization**: first build crystal structure, then do structure optimization to get ground state configuration and energy $E_0$. This includes two steps: first guess the lattice constant, then optimize each atoms' position and get ground state energy, continue to change lattice constant to get the lowest energy configuration.
+2.  **Strain-Stress relation at 0K**: give strain perturbation on cell, then do structure optimization again, now get E', finite difference to get stress. Complete the $6\times 6$ matrix $C_{ij}$
+3. **Finite temperature case**: first do NPT to get equilibrium volume at given temperature (average lattice constant over long time steps), then do NVT to get average stress under different strain perturbation at differnet temperature. Here I use thermal bath Nose-Hoover thermostat to control temperature.
+
+## Results
+After running the code, we can get elastic constants of Al and diamond C at 0K and finite temperature, the results show that:
+1. For Al, the elastic constants decrease with increasing temperature, which is consistent with experimental observations. The calculated values at 0K are in good agreement with literature values.
+2. For diamond C, the elastic constants also decrease with increasing temperature, but the rate of decrease is less pronounced compared to Al. The calculated values at 0K are also in good agreement with literature values.
+3. It turned out that the empirical potentials used (EAM for Al and LCBOP for diamond C) are effective in capturing the elastic properties of these materials, although some discrepancies with experimental data may arise due to the limitations of the potentials.
+
+
+## References
+[1] https://www.vasp.at/wiki/Phonons:_Theory
+[2] https://next-gen.materialsproject.org/
+[3] arXiv:2503.14020v1 [physics.comp-ph] 18 Mar 2025
+[4] LAMMPS - a flexible simulation tool for particle-based materials modeling at the atomic, meso, and continuum scales, A. P. Thompson, et.al. Comp Phys Comm, 271 (2022) 10817.
