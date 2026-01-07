@@ -12,5 +12,5 @@ I use a win64-LAMMPS software installed on my own PC to compute atoms-inter-forc
 use Slater-Koster method to give the band of diamond Si (0K configuration), then compute its optical properties such as $\epsilon(\omega)$ and absorption $\alpha(\omega)$, but NO phonon interaction is included, so the electron only hop directly.
 
 ## photonic crystal 
-Use MPB to calculate the H field of 225 space group , do symmetry analysis to its band structure at high-symmetry k-points in 1BZ.
+Use MPB to calculate the H field of 221 space group , do symmetry analysis to its band structure at high-symmetry k-points in 1BZ and you can get the character of thier irreducible representations, using compatibility relation and you can judge the splitting behavior of the bands , but there is some problem when $\omega$ reaches 0, which has a quite interesting reason.
 
